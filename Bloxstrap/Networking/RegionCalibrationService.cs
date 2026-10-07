@@ -19,8 +19,9 @@ namespace Bloxstrap.Networking
             if (!operation.WaitOne(0)) throw new InvalidOperationException("Another network test or WARP change is already running.");
             try
             {
-                using var activeGame = Process.GetProcessesByName("RobloxPlayerBeta").FirstOrDefault();
-                if (activeGame is not null) throw new InvalidOperationException("Close Roblox before testing. The comparison switches your computer's network route.");
+                var activeGames = Process.GetProcessesByName("RobloxPlayerBeta");
+                foreach (var game in activeGames) game.Dispose();
+                if (activeGames.Length > 0) throw new InvalidOperationException("Close Roblox before testing. The comparison switches your computer's network route.");
                 if (reset) { progress?.Report("Clearing network logs and learned preferences…"); NetworkHistory.Reset(); }
                 progress?.Report("Checking the current connection and discovering Roblox routing targets…");
                 var original = await CloudflareNetworkState.QueryAsync(token, true);
