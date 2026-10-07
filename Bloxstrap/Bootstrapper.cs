@@ -889,6 +889,7 @@ namespace Bloxstrap
                 var watcherData = new WatcherData
                 {
                     ProcessId = _appPid,
+                    AutoLogRecovery = App.LaunchSettings.AutoLogHomeFlag.Active,
                     LogFile = logFileName,
                     AutoclosePids = autoclosePids,
                     LaunchMode = _launchMode
@@ -1652,6 +1653,19 @@ namespace Bloxstrap
                         filesToDelete.Remove(relativeFile);
                     }
                 }
+            }
+
+            if (!IsStudioLaunch)
+            {
+                try
+                {
+                    foreach (var fontFile in Roblox.AppearanceFont.CreateFiles(_latestVersionDirectory, App.Settings.Prop.CustomFontPath, finalFilesToCopy))
+                    {
+                        finalFilesToCopy[fontFile.Key] = fontFile.Value;
+                        filesToDelete.Remove(fontFile.Key);
+                    }
+                }
+                catch (Exception ex) { App.Logger.WriteException("AppearanceFont", ex); }
             }
 
             foreach (var relPath in filesToDelete)

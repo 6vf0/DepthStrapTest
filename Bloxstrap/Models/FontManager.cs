@@ -11,7 +11,7 @@ namespace Bloxstrap.Models
             if (!File.Exists(fontFilePath))
                 return null;
 
-            string tempFontsRoot = Path.Combine(Path.GetTempPath(), "Froststrap", "Fonts");
+            string tempFontsRoot = Path.Combine(Path.GetTempPath(), "DepthStrap", "Fonts");
 
             string uniqueFontFolder = Path.Combine(tempFontsRoot, Guid.NewGuid().ToString());
             Directory.CreateDirectory(uniqueFontFolder);
@@ -66,7 +66,7 @@ namespace Bloxstrap.Models
             ApplyFontGlobally(defaultFont);
             IsCustomFontApplied = false;
             App.Settings.Prop.CustomFontPath = null;
-            App.Settings.Save();
+            Networking.AdaptiveRegionService.SaveUserSettings();
         }
     }
 }

@@ -12,13 +12,20 @@ namespace Bloxstrap.Networking
         public static RouteDecision Decide(IEnumerable<RoutingSample> direct, IEnumerable<RoutingSample> warp)
         {
             var normal = Combine(direct).ToDictionary(x => x.Address);
-            var paired = Combine(warp).Where(x => normal.ContainsKey(x.Address))
+            var tunneled = Combine(warp).ToList();
+            var paired = tunneled.Where(x => normal.ContainsKey(x.Address))
                 .Select(x => (Direct: normal[x.Address], Warp: x))
                 // Multiple interfaces in one city are not independent location evidence.
                 .GroupBy(x => (x.Direct.City.Trim().ToUpperInvariant(), x.Direct.Country.Trim().ToUpperInvariant()))
                 .Select(group => (Direct: Collapse(group.Select(x => x.Direct)), Warp: Collapse(group.Select(x => x.Warp))))
                 .OrderBy(x => x.Direct.Cost).Take(3).ToList();
-            if (paired.Count < 2) return new(null, null, null, paired.Count, "Not enough matching routing locations to recommend a route. The starting WARP state was restored.");
+            if (paired.Count < 2)
+            {
+                int directLocations = normal.Values.Select(x => (x.City, x.Country)).Distinct().Count();
+                int warpLocations = tunneled.Select(x => (x.City, x.Country)).Distinct().Count();
+                return new(null, null, null, paired.Count,
+                    $"Route comparison is inconclusive: normal routing had {directLocations} reliable IPv4 locations, WARP had {warpLocations}, and {paired.Count} matched on both. At least two matching locations with repeat measurements are needed. Some published routing addresses do not answer ICMP on your connection; this does not mean Roblox cannot connect. The starting WARP state was retained. You can keep playing, use the manual WARP toggle, or retry Reset Network later.");
+            }
             double d = Median(paired.Select(x => x.Direct.Cost));
             double w = Median(paired.Select(x => x.Warp.Cost));
             bool benefit = d - w >= Math.Max(5, d * .15) && paired.Count(x => x.Warp.Cost < x.Direct.Cost) >= 2 &&

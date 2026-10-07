@@ -102,7 +102,7 @@ namespace Bloxstrap.Competitive
         /// </summary>
         public static (string Title, string Message)? BuildNotification(CompetitiveRegionResult result)
         {
-            if (!result.IsDeepwoken)
+            if (!result.IsDeepwoken || result.PlaceId == BadRegionAutoLog.EntryPlaceId)
                 return null; // other games: log only, no tray spam
 
             bool chime = result.IsTeleport && result.IsReservedServer;

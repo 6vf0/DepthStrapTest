@@ -61,9 +61,19 @@ namespace Bloxstrap.Networking
                 }
                 // The observed Roblox gameplay endpoints are IPv4. IPv6 coverage must not
                 // select a tunnel on the strength of a different address family alone.
-                var gameplayFamily = samples.Where(x => IPAddress.TryParse(x.Address, out var address) && address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
-                    .GroupBy(x => (x.Route, x.Address)).Where(group => group.Count(x => x.Usable) >= 2).SelectMany(group => group).ToList();
-                decision = NetworkComparison.Decide(gameplayFamily.Where(x => x.Route == "direct"), gameplayFamily.Where(x => x.Route.StartsWith("warp:", StringComparison.Ordinal)));
+                decision = DecideRepeatedSamples(samples);
+                // A partial match can be a transient failure rather than blocked ICMP.
+                // Give it one additional pair of verified passes without weakening evidence.
+                if (decision.UseWarp is null && HasIpv4Replies(samples, false) && HasIpv4Replies(samples, true))
+                {
+                    progress?.Report("Partial routing coverage; retrying normal routing and WARP once more…");
+                    await ProbeVerifiedAsync(await SwitchAsync(client, false, state, token, settlingMs, pollingMs));
+                    var retryWarp = await SwitchAsync(client, true, state, token, settlingMs, pollingMs);
+                    if (AdaptiveRegionService.RouteKey(retryWarp) != testedWarpRoute)
+                        throw new IOException("WARP ingress changed during the retry. No route recommendation was applied; retry the comparison.");
+                    await ProbeVerifiedAsync(retryWarp);
+                    decision = DecideRepeatedSamples(samples);
+                }
                 bool target = decision.UseWarp ?? original;
                 progress?.Report("Applying and verifying the selected route…");
                 final = await SwitchAsync(client, target, state, token, settlingMs, pollingMs);
@@ -99,6 +109,16 @@ namespace Bloxstrap.Networking
                 }
             }
             return new(decision, samples, final, error, directCountry);
+        }
+        private static bool HasIpv4Replies(IEnumerable<RoutingSample> samples, bool warp) =>
+            samples.Any(x => x.Usable && (warp ? x.Route.StartsWith("warp:", StringComparison.Ordinal) : x.Route == "direct") &&
+                IPAddress.TryParse(x.Address, out var address) && address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
+
+        internal static RouteDecision DecideRepeatedSamples(IEnumerable<RoutingSample> samples)
+        {
+            var repeated = samples.Where(x => IPAddress.TryParse(x.Address, out var address) && address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                .GroupBy(x => (x.Route, x.Address)).Where(group => group.Count(x => x.Usable) >= 2).SelectMany(group => group).ToList();
+            return NetworkComparison.Decide(repeated.Where(x => x.Route == "direct"), repeated.Where(x => x.Route.StartsWith("warp:", StringComparison.Ordinal)));
         }
     }
 }

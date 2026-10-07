@@ -3,11 +3,11 @@ namespace Bloxstrap.Competitive
     internal static class BadRegionAutoLog
     {
         internal static bool ShouldLeave(Models.CompetitiveNetworkEvent result, Settings settings,
-            string currentJob, DateTime now, RegionClassification classification)
+            string currentJob, DateTime now, RegionClassification classification, bool recoveryClient = false)
         {
-            if (!settings.AutoLeaveBadChimeRegion || !settings.CompetitiveModeEnabled || !IsDeepwoken(result) ||
+            if (recoveryClient || result.PlaceId == EntryPlaceId || !settings.AutoLeaveBadChimeRegion || !settings.CompetitiveModeEnabled || !IsDeepwoken(result) ||
                 string.IsNullOrEmpty(currentJob) || result.JobId != currentJob || classification.IsConfiguredRegion ||
-                classification.Quality == RegionQuality.Unknown || result.RegionSource == "Unknown" || result.RegionSource.Length == 0 ||
+                classification.Quality is not (RegionQuality.Bad or RegionQuality.Poor) || result.RegionSource == "Unknown" || result.RegionSource.Length == 0 ||
                 now < result.Timestamp || now - result.Timestamp > TimeSpan.FromSeconds(60)) return false;
             if (!string.IsNullOrWhiteSpace(settings.CompetitivePreferredCity) || settings.CompetitiveFallbackCities.Any(x => !string.IsNullOrWhiteSpace(x))) return true;
             // Before a city has been measured, only a confirmed outside-area join qualifies.
@@ -16,6 +16,7 @@ namespace Bloxstrap.Competitive
         }
 
         internal const string HomeUri = "roblox://navigation/home";
+        internal const long EntryPlaceId = 4111023553;
         // Entry place verified against Roblox's public universe API. Subplaces are identified by universe,
         // never by a fixed list of Layer/Chime place IDs; reserved destinations cannot be resumed by URI.
         internal const string RejoinUri = "roblox://experiences/start?placeId=4111023553";

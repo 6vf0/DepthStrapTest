@@ -67,7 +67,7 @@ namespace Bloxstrap.UI.ViewModels.Settings
             {
                 var dialog = new OpenFileDialog
                 {
-                    Filter = "Font files (*.ttf;*.otf)|*.ttf;*.otf|All files (*.*)|*.*"
+                    Filter = "Font files (*.ttf;*.otf)|*.ttf;*.otf"
                 };
 
                 if (dialog.ShowDialog() == true)
@@ -76,10 +76,13 @@ namespace Bloxstrap.UI.ViewModels.Settings
                     try
                     {
                         var fontFamily = FontManager.LoadFontFromFile(fontPath);
+                        if (fontFamily is null) throw new InvalidDataException("This file does not contain a usable font family.");
                         if (fontFamily != null)
                         {
+                            string stored = Roblox.AppearanceFont.Store(fontPath);
                             FontManager.ApplyFontGlobally(fontFamily);
-                            App.Settings.Prop.CustomFontPath = fontPath;
+                            App.Settings.Prop.CustomFontPath = stored;
+                            Networking.AdaptiveRegionService.SaveUserSettings();
 
                             UpdateFontVisibility();
 

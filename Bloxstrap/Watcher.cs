@@ -108,14 +108,14 @@ namespace Bloxstrap
         {
             if (_isDisposed || ActivityWatcher is null || _watcherData is null) return false;
             var classification = CompetitiveRegionService.Classify(result.Location, source: result.RegionSource);
-            if (!BadRegionAutoLog.ShouldLeave(result, App.Settings.Prop, ActivityWatcher.Data.JobId, DateTime.Now, classification)) return false;
+            if (!BadRegionAutoLog.ShouldLeave(result, App.Settings.Prop, ActivityWatcher.Data.JobId, DateTime.Now, classification, _watcherData.AutoLogRecovery)) return false;
             // Preserve the measurements and reason before this client's monitor stops.
             await CompetitiveSessionLogger.WriteNetworkEventAsync(result, CancellationToken.None);
             System.Windows.Application.Current.Dispatcher.Invoke(() =>
             {
                 if (_isDisposed || !ActivityWatcher.InGame || ActivityWatcher.Data.UniverseId != CompetitiveRegionService.DeepwokenUniverseId ||
                     !BadRegionAutoLog.ShouldLeave(result, App.Settings.Prop, ActivityWatcher.Data.JobId, DateTime.Now,
-                        CompetitiveRegionService.Classify(result.Location, source: result.RegionSource))) return;
+                        CompetitiveRegionService.Classify(result.Location, source: result.RegionSource), _watcherData.AutoLogRecovery)) return;
                 Process? player = null;
                 TaskCompletionSource? completed = null;
                 try
@@ -125,13 +125,23 @@ namespace Bloxstrap
                     string version = Path.GetFileName(Path.GetDirectoryName(player.MainModule?.FileName)) ?? "";
                     if (!RobloxVersionArchive.IsVersionId(version)) throw new InvalidDataException("Could not identify the running Roblox build.");
                     if (Interlocked.Exchange(ref _autoLogStarted, 1) != 0) { player.Dispose(); return; }
+                    // Reserve before closing anything. A recovery client never autologs again;
+                    // manual relaunches and other clients share this conservative cooldown.
+                    if (!AutoLogHomeHandoff.ReserveRetry())
+                    {
+                        player.Dispose();
+                        CompetitiveSessionLogger.Write("AUTOLOG: recovery cooldown active; leaving this client running.");
+                        return;
+                    }
                     completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                     Volatile.Write(ref _returnHomeTask, completed.Task);
                     bool rejoin = BadRegionAutoLog.ShouldRejoin(result, App.Settings.Prop);
+                    ActivityWatcher.SuppressAutoRejoin = true;
                     if (!player.CloseMainWindow())
                     {
                         completed.TrySetResult(); player.Dispose();
                         Interlocked.Exchange(ref _autoLogStarted, 0);
+                        ActivityWatcher.SuppressAutoRejoin = false;
                         new UI.Elements.Dialogs.BadRegionAlertWindow("Autolog could not leave", "Roblox did not accept a normal window close. Leave the game manually.").Show();
                         return;
                     }
@@ -168,9 +178,9 @@ namespace Bloxstrap
             var homeData = await AutoLogHomeHandoff.WaitAsync(nonce, _cancellationTokenSource.Token);
             using var home = Process.GetProcessById(homeData.Watcher.ProcessId);
             if (home.HasExited || home.ProcessName != "RobloxPlayerBeta" || home.StartTime != homeData.StartedAt) return;
-            if (!rejoin || !AutoLogHomeHandoff.ReserveRetry())
+            if (!rejoin)
             {
-                CompetitiveSessionLogger.Write("AUTOLOG: staying on Home (rejoin disabled or retry limit reached).");
+                CompetitiveSessionLogger.Write("AUTOLOG: staying on Home (rejoin disabled).");
                 return;
             }
             if (!await Task.Run(() => home.WaitForInputIdle(15000))) return;

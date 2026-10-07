@@ -36,6 +36,7 @@ namespace Bloxstrap.Roblox
         private bool _teleportMarker = false;
         private bool _reservedTeleportMarker = false;
         private bool _shouldAutoRejoin = false;
+        internal bool SuppressAutoRejoin { get; set; }
 
         private static readonly string GameHistoryCachePath = Path.Combine(Paths.Cache, "GameHistory.json");
         public event EventHandler? OnHistoryUpdated;
@@ -458,11 +459,11 @@ namespace Bloxstrap.Roblox
                     var autoRejoinData = Data;
                     Data = new();
 
-                    if (App.Settings.Prop.AutoRejoin)
+                    if (App.Settings.Prop.AutoRejoin && !SuppressAutoRejoin)
                     {
                         await Task.Delay(3000);
 
-                        if (_shouldAutoRejoin)
+                        if (_shouldAutoRejoin && !SuppressAutoRejoin)
                         {
                             autoRejoinData.RejoinServer(false);
 

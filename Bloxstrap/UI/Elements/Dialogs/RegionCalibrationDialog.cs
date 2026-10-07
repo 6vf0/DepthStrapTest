@@ -38,6 +38,7 @@ namespace Bloxstrap.UI.Elements.Dialogs
             _terms.IsChecked = App.Settings.Prop.CloudflareTermsAccepted;
             panel.Children.Add(_terms);
             panel.Children.Add(new TextBlock { TextWrapping = TextWrapping.Wrap, Text = "The official Cloudflare package downloads as part of setup. Windows may ask for administrator permission. Both routes receive three passes with 24 probes per published IPv4/IPv6 target, at least 45 seconds per pass, and 15 seconds to settle after switching. Allow 6–15 minutes; unresponsive targets can take longer, up to the 45-minute test limit. Routing probes are provisional; they do not measure Roblox gameplay ping." });
+            panel.Children.Add(new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0,8,0,0), Text = "Partial coverage gets one extra comparison pass. If fewer than two locations reply reliably on both routes, setup keeps your starting WARP state and explains the result. The manual WARP toggle remains available." });
             _status.Text = "Ready to test. No city is preselected. Play history will refine the measured preference.";
             panel.Children.Add(_status);
             var start = new Button { Content = "Set up WARP and compare", Padding = new Thickness(12,6,12,6), Margin = new Thickness(0,0,8,0) };
@@ -61,7 +62,7 @@ namespace Bloxstrap.UI.Elements.Dialogs
             {
                 var progress = new Progress<string>(message => _status.Text = message);
                 var result = await RegionCalibrationService.RunComparisonAsync(_reset, setupWarp, progress, _cts.Token);
-                Frontend.ShowMessageBox(result.Status, result.Completed ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                Frontend.ShowMessageBox(result.Status, result.SetupFinished ? MessageBoxImage.Information : MessageBoxImage.Warning);
                 _running = false; Close();
             }
             catch (Exception ex)

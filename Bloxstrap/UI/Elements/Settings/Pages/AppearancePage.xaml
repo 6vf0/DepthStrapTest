@@ -24,7 +24,7 @@
     </StackPanel>
    </StackPanel>
   </Border>
-  <controls:OptionControl Header="App font" Description="Choose your own font for the interface.">
+  <controls:OptionControl Header="App and Roblox font" Description="Choose a .ttf or .otf font. DepthStrap changes immediately; Roblox uses it for local interface font families on the next launch. Game-provided fonts may differ. Reset restores the app now and Roblox's font files on its next launch.">
    <StackPanel Orientation="Horizontal">
     <ui:Button Content="Choose font" Command="{Binding ManageCustomFontCommand}" CommandParameter="Choose" Padding="12,6" />
     <ui:Button Content="Reset font" Command="{Binding ManageCustomFontCommand}" CommandParameter="Remove" Padding="12,6" Margin="8,0,0,0" />

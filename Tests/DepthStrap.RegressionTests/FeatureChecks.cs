@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.Json;
 using Bloxstrap;
 using Bloxstrap.Competitive;
 using Bloxstrap.Integrations;
@@ -14,6 +15,30 @@ internal static class FeatureChecks
     {
         check(ReleaseMigration.IsPrototypeToFirstRelease("DepthStrap", "1.5.1", "1.0.0") && !ReleaseMigration.NeedsLegacyMigrations("DepthStrap") && ReleaseMigration.NeedsLegacyMigrations("Froststrap"), "DepthStrap 1.0 can replace the prototype without triggering upstream version migrations");
         var settings = new Settings();
+        string fontFixture = Path.Combine(Paths.Cache, "font-fixture.ttf");
+        Directory.CreateDirectory(Paths.Cache);
+        File.WriteAllBytes(fontFixture, new byte[] { 0, 1, 0, 0, 1, 2, 3, 4 });
+        string storedFont = AppearanceFont.Store(fontFixture);
+        File.Delete(fontFixture);
+        check(File.Exists(storedFont), "Appearance keeps its own font copy when the selected download is removed");
+        string fontBuild = Path.Combine(Paths.Cache, "font-build");
+        string families = Path.Combine(fontBuild, "content", "fonts", "families");
+        Directory.CreateDirectory(families);
+        string originalFamily = "{\"name\":\"Fixture\",\"extraMetadata\":true,\"faces\":[{\"weight\":400,\"assetId\":\"rbxasset://fonts/Original.ttf\"},{\"weight\":700,\"assetId\":\"rbxasset://fonts/Bold.ttf\"}]}";
+        File.WriteAllText(Path.Combine(families, "Fixture.json"), originalFamily);
+        var fontFiles = AppearanceFont.CreateFiles(fontBuild, storedFont, new Dictionary<string, string>());
+        string familyKey = Path.Combine("content", "fonts", "families", "Fixture.json");
+        using (var patched = JsonDocument.Parse(File.ReadAllText(fontFiles[familyKey])))
+            check(patched.RootElement.GetProperty("extraMetadata").GetBoolean() && patched.RootElement.GetProperty("faces").EnumerateArray().All(x =>
+                x.GetProperty("assetId").GetString() == "rbxasset://fonts/DepthStrapCustomFont.ttf"), "Roblox font patch replaces all weights and preserves family metadata");
+        check(File.ReadAllText(Path.Combine(families, "Fixture.json")) == originalFamily && fontFiles.Count == 2,
+            "Appearance stages font and families for the restorable mod manifest without changing installed files directly");
+        check(AppearanceFont.CreateFiles(fontBuild, null, new Dictionary<string, string>()).Count == 0,
+            "Reset removes all Appearance font entries so the mod pipeline restores Roblox originals");
+        string badFont = Path.Combine(Paths.Cache, "invalid-font.otf"); File.WriteAllText(badFont, "invalid");
+        bool rejectedFont = false;
+        try { AppearanceFont.Store(badFont); } catch (InvalidDataException) { rejectedFont = true; }
+        check(rejectedFont, "Invalid custom fonts cannot enter Roblox's font patch");
         check(settings.PauseRobloxUpdates && settings.AutomaticRegionalPreference && settings.CompetitivePreferredCity.Length == 0 && settings.CompetitiveFallbackCities.Count == 0,
             "Fresh installs pause updates and learn regions without a seeded city");
         new NetworkTestResult { DirectCountry = "GB" }.Apply(settings);
@@ -107,6 +132,13 @@ internal static class FeatureChecks
             PlaceId = 999001, IsDeepwoken = true, JobId = "current", RegionSource = "Roblox DataCenterId", Location = "London, United Kingdom" };
         var outside = new RegionClassification { Quality = RegionQuality.Bad };
         check(BadRegionAutoLog.ShouldLeave(joined, autolog, "current", DateTime.Now, outside), "A confirmed NA-to-EU Deepwoken join qualifies for opt-in autolog");
+        check(!BadRegionAutoLog.ShouldLeave(joined with { PlaceId = BadRegionAutoLog.EntryPlaceId }, autolog, "current", DateTime.Now, outside),
+            "Deepwoken's entry menu cannot trigger a close/rejoin loop");
+        check(!BadRegionAutoLog.ShouldLeave(joined, autolog, "current", DateTime.Now, outside, recoveryClient: true),
+            "A recovered client remains playable even if matchmaking returns another bad region");
+        check(!BadRegionAutoLog.ShouldLeave(joined, autolog, "current", DateTime.Now, new RegionClassification { Quality = RegionQuality.Acceptable }) &&
+              !BadRegionAutoLog.ShouldLeave(joined, autolog, "current", DateTime.Now, new RegionClassification { Quality = RegionQuality.Good }),
+            "An unmeasured city inside the preferred area cannot trigger autolog just because it is absent from fallbacks");
         autolog.PreferNorthAmericaOnly = false; autolog.PreferEuropeOnly = true;
         check(BadRegionAutoLog.ShouldLeave(joined with { Location = "Singapore" }, autolog, "current", DateTime.Now, outside), "An EU-to-Asia Deepwoken join qualifies for autolog");
         check(!BadRegionAutoLog.ShouldLeave(joined, autolog, "current", DateTime.Now, new RegionClassification { Quality = RegionQuality.Good, IsConfiguredRegion = true }),
@@ -128,14 +160,22 @@ internal static class FeatureChecks
         check(parsed.RobloxLaunchArgs == "roblox://navigation/home" && parsed.RobloxLaunchMode == Bloxstrap.Enums.LaunchMode.Player && parsed.VersionFlag.Data == installed,
             "Home handoff uses the native Home URI and exact installed Player build, avoiding an update during multi-client handoff");
         var rejoinLaunch = AutoLogHomeHandoff.Launch(BadRegionAutoLog.RejoinUri, installed);
+        check(new LaunchSettings(rejoinLaunch.ArgumentList.ToArray()).AutoLogHomeFlag.Active &&
+              JsonSerializer.Deserialize<WatcherData>(JsonSerializer.Serialize(new WatcherData { AutoLogRecovery = true }))!.AutoLogRecovery,
+            "The recovery marker survives the automatic launcher and watcher process handoff");
         check(RobloxLaunchUri.TryParse(rejoinLaunch.ArgumentList[0])?.PlaceId == 4111023553 && !rejoinLaunch.ArgumentList[0].Contains("gameInstanceId"),
             "Rejoin returns to Deepwoken entry matchmaking rather than a reserved subplace or the same bad server");
         check(BadRegionAutoLog.IsIdleHomeLog("[FLog::Output] Home loaded") &&
               !BadRegionAutoLog.IsIdleHomeLog("[FLog::Output] ! Joining game 'fixture' place 123 at 192.0.2.1") &&
               !BadRegionAutoLog.IsIdleHomeLog("[FLog::GameJoinUtil] GameJoinUtil::initiateTeleportToReservedServer"),
             "A new public or reserved game join on Home cancels the queued Deepwoken rejoin");
-        check(!AutoLogHomeHandoff.RetryAllowed(Enumerable.Repeat(DateTime.Now, 3), DateTime.Now) &&
-              AutoLogHomeHandoff.RetryAllowed(Enumerable.Repeat(DateTime.Now.AddMinutes(-11), 3), DateTime.Now), "Three retries per ten minutes prevent endless autolog/rejoin loops");
+        check(!AutoLogHomeHandoff.RetryAllowed(new[] { DateTime.Now }, DateTime.Now) &&
+              AutoLogHomeHandoff.RetryAllowed(Enumerable.Repeat(DateTime.Now.AddMinutes(-11), 3), DateTime.Now), "One recovery per ten minutes prevents repeated autolog/rejoin loops");
+        var reservations = Task.WhenAll(Enumerable.Range(0, 8).Select(_ => Task.Run(AutoLogHomeHandoff.ReserveRetry))).GetAwaiter().GetResult();
+        check(reservations.Count(x => x) == 1 && !AutoLogHomeHandoff.ReserveRetry(),
+            "Only one concurrent client can reserve a recovery; persisted cooldown prevents a later launcher from closing Roblox again");
+        File.WriteAllText(Path.Combine(Paths.Cache, "AutoLogRetries.json"), JsonSerializer.Serialize(new[] { DateTime.Now.AddMinutes(-11) }));
+        check(AutoLogHomeHandoff.ReserveRetry(), "A manual launch can recover again after the shared cooldown expires");
         App.Settings.Prop = new Settings { CompetitivePreferredCity = "Old UI choice", PreferNorthAmericaOnly = true };
         var learnedDisk = new JsonManager<Settings>();
         learnedDisk.Prop = new Settings { CompetitivePreferredCity = "Santiago de Querétaro", CompetitiveFallbackCities = new() { "Dallas" }, PreferNorthAmericaOnly = true };

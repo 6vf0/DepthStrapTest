@@ -52,7 +52,7 @@ namespace Bloxstrap.Competitive
         }
 
         internal static bool RetryAllowed(IEnumerable<DateTime> attempts, DateTime now) =>
-            attempts.Count(x => x > now.AddMinutes(-10)) < 3;
+            attempts.All(x => x <= now.AddMinutes(-10));
 
         internal static bool ReserveRetry()
         {

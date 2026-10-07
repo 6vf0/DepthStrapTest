@@ -41,6 +41,9 @@ internal static class NetworkChecks
         check(NetworkComparison.Decide(Samples("direct", 20), Samples("warp:FIXTURE", 18)).UseWarp == false, "Small timing differences do not enable WARP");
         check(NetworkComparison.Decide(Samples("direct", 60), Samples("warp:FIXTURE", 20, 30)).UseWarp == false, "Higher echo loss prevents an automatic tunnel recommendation");
         check(NetworkComparison.Decide(Samples("direct", 60), Samples("warp:FIXTURE", 20).Take(1)).UseWarp is null, "Insufficient matched targets stay inconclusive");
+        var unavailable = NetworkComparison.Decide(Array.Empty<RoutingSample>(), Array.Empty<RoutingSample>());
+        check(unavailable.UseWarp is null && unavailable.Reason.Contains("normal routing had 0") && unavailable.Reason.Contains("does not mean Roblox cannot connect") &&
+              unavailable.Reason.Contains("manual WARP toggle"), "Blocked routing probes explain the coverage and retain playable manual controls");
         check(NetworkComparison.Decide(Samples("direct", 60), Samples("warp:FIXTURE", double.NaN)).UseWarp is null, "Invalid probe values are excluded");
         var oneWarpTarget = Enumerable.Repeat(Samples("warp:FIXTURE", 20)[0], 5);
         check(NetworkComparison.Decide(Samples("direct", 60), oneWarpTarget).UseWarp is null, "Repeated replies from one address cannot count as independent WARP targets");
@@ -96,6 +99,18 @@ internal static class NetworkChecks
             warp = new FakeWarp(); int passes = 0;
             run = await RouteComparisonRunner.RunAsync(warp, false, warp.State, (route, _) => Task.FromResult(++passes <= 2 ? Samples(route, route == "direct" ? 60 : 20) : new List<RoutingSample>()), null, CancellationToken.None, 0, 0);
             check(run.Decision?.UseWarp is null && run.FinalState?.WarpActive == false, "One successful pass per route is insufficient to recommend WARP");
+            warp = new FakeWarp(); int directPasses = 0, warpPasses = 0;
+            run = await RouteComparisonRunner.RunAsync(warp, false, warp.State, (route, _) =>
+            {
+                int pass = route == "direct" ? ++directPasses : ++warpPasses;
+                return Task.FromResult(pass is 1 or 4 ? Samples(route, route == "direct" ? 60 : 20) : new List<RoutingSample>());
+            }, null, CancellationToken.None, 0, 0);
+            check(directPasses == 4 && warpPasses == 4 && run.Decision?.UseWarp == true && run.FinalState?.WarpActive == true,
+                "Partial coverage receives a fourth verified pair and only recommends after repeat evidence is recovered");
+            warp = new FakeWarp { Connected = true }; int emptyPasses = 0;
+            run = await RouteComparisonRunner.RunAsync(warp, true, warp.State, (route, _) => { emptyPasses++; return Task.FromResult(new List<RoutingSample>()); }, null, CancellationToken.None, 0, 0);
+            check(emptyPasses == 6 && run.Decision?.UseWarp is null && run.Error.Length == 0 && run.FinalState?.WarpActive == true,
+                "Wholly blocked probes finish inconclusively and retain the original ON state without endless retests");
             if (verifiedPackage is not null)
             {
                 try { await WarpClient.VerifyPublisherAsync(Path.GetFullPath(verifiedPackage), CancellationToken.None); }
@@ -132,6 +147,11 @@ internal static class NetworkChecks
         check(!App.Settings.Prop.CompetitiveIcmpEnabled && !App.Settings.Prop.AutoSelectPreferredServerOnLaunch && !App.Settings.Prop.CompetitiveTracerouteEnabled && App.Settings.Prop.ChimeRegionMonitorEnabled && App.Settings.Prop.CompetitiveCloudflareDetectionEnabled, "Features follow measured capability without mistaking blocked ICMP for absent region lookup");
         new NetworkTestResult { IcmpAvailable = true, RegionsAvailable = true, CloudflareAvailable = true, TraceAvailable = true }.Apply(App.Settings.Prop);
         check(App.Settings.Prop.CompetitiveIcmpEnabled && App.Settings.Prop.AutoSelectPreferredServerOnLaunch && App.Settings.Prop.CompetitiveTracerouteEnabled && !App.Settings.Prop.StoreFullEgressIpInLogs, "Successful follow-up tests enable capabilities and preserve masked logging");
+        new NetworkTestResult { SetupFinished = true, Completed = false, RegionsAvailable = true, CloudflareAvailable = true,
+            Comparison = unavailable, FinalWarpState = false }.Save();
+        var inconclusiveSettings = JsonSerializer.Deserialize<Settings>(File.ReadAllText(App.Settings.FileLocation))!;
+        check(inconclusiveSettings.NetworkSetupVersion == 1 && !inconclusiveSettings.RegionCalibrationCompleted && inconclusiveSettings.WarnOnBadChimeRegion,
+            "An inconclusive route comparison finishes setup without falsely claiming calibration or rerunning setup on every launch");
         var old = DateTime.UtcNow.AddMinutes(-1);
         Directory.CreateDirectory(Path.Combine(Paths.Logs, "CompetitiveRoutes"));
         File.WriteAllText(Path.Combine(Paths.Logs, "CompetitiveRoutes", "fixture.txt"), "fixture");

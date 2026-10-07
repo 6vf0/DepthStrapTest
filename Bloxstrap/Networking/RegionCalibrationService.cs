@@ -94,7 +94,7 @@ namespace Bloxstrap.Networking
                     catch (OperationCanceledException) { /* unavailable diagnostic capability */ }
                 }
                 token.ThrowIfCancellationRequested();
-                bool completed = run.Decision is not null && run.Error.Length == 0 && run.FinalState?.WarpActive is not null;
+                bool completed = run.Decision?.UseWarp is not null && run.Error.Length == 0 && run.FinalState?.WarpActive is not null;
                 var ipv4Samples = finalSamples.Where(x => IPAddress.TryParse(x.Address, out var address) && address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork).ToList();
                 string finalState = run.FinalState?.WarpActive switch { true => "ON", false => "OFF", _ => "UNKNOWN — check Cloudflare WARP" };
                 string scores = run.Decision?.DirectScore is double d && run.Decision.WarpScore is double w
@@ -107,7 +107,7 @@ namespace Bloxstrap.Networking
                 {
                     UnprobedRegions = unprobed,
                     DirectCountry = directCountry,
-                    SetupFinished = completed || (!setupWarp && setupError.Length == 0 && regions && run.FinalState?.WarpActive is not null),
+                    SetupFinished = completed || ((run.Error.Length == 0 || !setupWarp) && setupError.Length == 0 && regions && run.FinalState?.WarpActive is not null),
                     Completed = completed, IcmpAvailable = ipv4Samples.Count > 0, CloudflareAvailable = run.FinalState?.WarpActive is not null,
                     RegionsAvailable = regions, TraceAvailable = trace, FinalWarpState = run.FinalState?.WarpActive, Comparison = run.Decision,
                     Status = (run.Error.Length > 0 ? run.Error : run.Decision?.Reason ?? "Comparison unavailable.") + scores + coverage + "\nWARP is " + finalState + ". Network features were adjusted to the capabilities measured on this route."
