@@ -9,7 +9,7 @@ namespace Bloxstrap.Networking
         private static HttpClient CreateClient()
         {
             var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("DepthStrap/1.0.0"); return client;
+            client.DefaultRequestHeaders.UserAgent.ParseAdd($"DepthStrap/{App.Version}"); return client;
         }
         internal static Semaphore OpenOperationGate() => new(1, 1, "DepthStrap-NetworkSetup");
         public static async Task RunAsync(CancellationToken token = default) => await RunComparisonAsync(false, false, null, token);
@@ -98,7 +98,7 @@ namespace Bloxstrap.Networking
                 var ipv4Samples = finalSamples.Where(x => IPAddress.TryParse(x.Address, out var address) && address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork).ToList();
                 string finalState = run.FinalState?.WarpActive switch { true => "ON", false => "OFF", _ => "UNKNOWN — check Cloudflare WARP" };
                 string scores = run.Decision?.DirectScore is double d && run.Decision.WarpScore is double w
-                    ? $"\nNormal: {d:0.0} ms score · WARP: {w:0.0} ms score · {run.Decision.MatchedTargets} matched targets. Scores include ICMP jitter/loss; these are not gameplay ping." : "";
+                    ? $"\nNormal: {d:0.0} ms score · WARP: {w:0.0} ms score · {run.Decision.MatchedTargets} matched routing locations. Scores include ICMP jitter/loss; these are not gameplay ping." : "";
                 string directCountry = run.DirectCountry.Length > 0 ? run.DirectCountry : original?.WarpActive == false ? original.Location : "";
                 var unprobed = CompetitiveRegionService.UnprobedLocations(targets.Select(x => x.City), directCountry);
                 string coverage = $"\n{targets.Select(x => (x.City, x.Country)).Distinct().Count()} routing locations discovered; {finalSamples.Select(x => x.City).Distinct().Count()} received usable replies on the selected route.";

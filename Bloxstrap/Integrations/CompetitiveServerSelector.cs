@@ -100,7 +100,7 @@ namespace Bloxstrap.Integrations
                 while (pagesChecked < maxPages && DateTime.Now < deadline)
                 {
                     var result = await fetcher.FetchServerInstancesAsync(placeId, cursor, sortOrder: 2, cancellationToken: token);
-                    if (result is null || result.Servers.Count == 0)
+                    if (result is null)
                         break;
 
                     foreach (var s in result.Servers)

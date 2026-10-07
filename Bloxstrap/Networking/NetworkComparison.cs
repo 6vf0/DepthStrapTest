@@ -13,8 +13,12 @@ namespace Bloxstrap.Networking
         {
             var normal = Combine(direct).ToDictionary(x => x.Address);
             var paired = Combine(warp).Where(x => normal.ContainsKey(x.Address))
-                .Select(x => (Direct: normal[x.Address], Warp: x)).OrderBy(x => x.Direct.Cost).Take(3).ToList();
-            if (paired.Count < 2) return new(null, null, null, paired.Count, "Not enough matching ICMP replies to recommend a route. The starting WARP state was restored.");
+                .Select(x => (Direct: normal[x.Address], Warp: x))
+                // Multiple interfaces in one city are not independent location evidence.
+                .GroupBy(x => (x.Direct.City.Trim().ToUpperInvariant(), x.Direct.Country.Trim().ToUpperInvariant()))
+                .Select(group => (Direct: Collapse(group.Select(x => x.Direct)), Warp: Collapse(group.Select(x => x.Warp))))
+                .OrderBy(x => x.Direct.Cost).Take(3).ToList();
+            if (paired.Count < 2) return new(null, null, null, paired.Count, "Not enough matching routing locations to recommend a route. The starting WARP state was restored.");
             double d = Median(paired.Select(x => x.Direct.Cost));
             double w = Median(paired.Select(x => x.Warp.Cost));
             bool benefit = d - w >= Math.Max(5, d * .15) && paired.Count(x => x.Warp.Cost < x.Direct.Cost) >= 2 &&
@@ -24,12 +28,17 @@ namespace Bloxstrap.Networking
                 : "WARP did not show a meaningful advantage in this comparison. Normal routing was selected.");
         }
         private static IEnumerable<RoutingSample> Combine(IEnumerable<RoutingSample> samples) =>
-            samples.Where(x => x.Usable).GroupBy(x => x.Address).Select(group => group.First() with
+            samples.Where(x => x.Usable).GroupBy(x => x.Address).Select(Collapse);
+        private static RoutingSample Collapse(IEnumerable<RoutingSample> samples)
+        {
+            var group = samples.ToList();
+            return group[0] with
             {
                 AverageMs = Median(group.Select(x => x.AverageMs)),
                 JitterMs = Median(group.Select(x => x.JitterMs)),
                 LossPercent = group.Max(x => x.LossPercent)
-            });
+            };
+        }
         private static double Median(IEnumerable<double> values)
         {
             var sorted = values.Order().ToArray();

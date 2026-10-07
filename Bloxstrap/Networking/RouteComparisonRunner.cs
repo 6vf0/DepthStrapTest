@@ -13,12 +13,22 @@ namespace Bloxstrap.Networking
             token = transition.Token;
             await client.SetConnectedAsync(connected, token);
             int confirmed = 0;
+            string previousRoute = "";
             for (int i = 0; i < 120; i++)
             {
                 await Task.Delay(pollingMs, token);
                 var actual = await state(token);
-                confirmed = actual?.WarpActive == connected ? confirmed + 1 : 0;
-                if (confirmed >= 3) { await Task.Delay(settlingMs, token); return actual!; }
+                string route = AdaptiveRegionService.RouteKey(actual);
+                confirmed = actual?.WarpActive == connected ? route == previousRoute ? confirmed + 1 : 1 : 0;
+                previousRoute = route;
+                if (confirmed >= 3)
+                {
+                    await Task.Delay(settlingMs, token);
+                    var settled = await state(token);
+                    if (settled?.WarpActive == connected && AdaptiveRegionService.RouteKey(settled) == route) return settled;
+                    confirmed = 0;
+                    previousRoute = "";
+                }
             }
             throw new IOException("WARP route change could not be verified. The comparison was stopped.");
         }
@@ -32,6 +42,7 @@ namespace Bloxstrap.Networking
             CloudflareTraceResult? final = null;
             string error = "", directCountry = "";
             bool selected = false;
+            string? testedWarpRoute = null;
             try
             {
                 for (int pass = 1; pass <= NetworkCalibrationProfile.PassesPerRoute; pass++)
@@ -39,22 +50,40 @@ namespace Bloxstrap.Networking
                     progress?.Report($"Testing normal routing, pass {pass} of {NetworkCalibrationProfile.PassesPerRoute}…");
                     var direct = await SwitchAsync(client, false, state, token, settlingMs, pollingMs);
                     directCountry = direct.Location;
-                    samples.AddRange(await probe(AdaptiveRegionService.RouteKey(direct), token));
+                    await ProbeVerifiedAsync(direct);
                     progress?.Report($"Testing Cloudflare WARP, pass {pass} of {NetworkCalibrationProfile.PassesPerRoute}…");
                     var tunneled = await SwitchAsync(client, true, state, token, settlingMs, pollingMs);
-                    samples.AddRange(await probe(AdaptiveRegionService.RouteKey(tunneled), token));
+                    string warpRoute = AdaptiveRegionService.RouteKey(tunneled);
+                    if (testedWarpRoute is not null && testedWarpRoute != warpRoute)
+                        throw new IOException("WARP ingress changed between passes. No route recommendation was applied; retry the comparison.");
+                    testedWarpRoute = warpRoute;
+                    await ProbeVerifiedAsync(tunneled);
                 }
                 // The observed Roblox gameplay endpoints are IPv4. IPv6 coverage must not
                 // select a tunnel on the strength of a different address family alone.
-                var gameplayFamily = samples.Where(x => IPAddress.TryParse(x.Address, out var address) && address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork).ToList();
+                var gameplayFamily = samples.Where(x => IPAddress.TryParse(x.Address, out var address) && address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                    .GroupBy(x => (x.Route, x.Address)).Where(group => group.Count(x => x.Usable) >= 2).SelectMany(group => group).ToList();
                 decision = NetworkComparison.Decide(gameplayFamily.Where(x => x.Route == "direct"), gameplayFamily.Where(x => x.Route.StartsWith("warp:", StringComparison.Ordinal)));
                 bool target = decision.UseWarp ?? original;
                 progress?.Report("Applying and verifying the selected route…");
                 final = await SwitchAsync(client, target, state, token, settlingMs, pollingMs);
+                if (decision.UseWarp == true && AdaptiveRegionService.RouteKey(final) != testedWarpRoute)
+                    throw new IOException("The final WARP ingress differs from the tested route. No route recommendation was applied; retry the comparison.");
                 selected = true;
+
+                async Task ProbeVerifiedAsync(CloudflareTraceResult expected)
+                {
+                    string route = AdaptiveRegionService.RouteKey(expected);
+                    var measured = await probe(route, token);
+                    var after = await state(token);
+                    if (after?.WarpActive != expected.WarpActive || AdaptiveRegionService.RouteKey(after) != route)
+                        throw new IOException("The network route changed during measurement. No route recommendation was applied; retry the comparison.");
+                    samples.AddRange(measured);
+                }
             }
             catch (Exception ex)
             {
+                decision = null; // A failed application must not retain a successful recommendation.
                 error = ex is OperationCanceledException ? "Network comparison was cancelled or timed out." : ex.Message;
                 App.Logger.WriteException("NetworkComparison", ex);
             }

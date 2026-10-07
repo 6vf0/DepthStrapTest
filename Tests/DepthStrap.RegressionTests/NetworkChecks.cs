@@ -44,6 +44,8 @@ internal static class NetworkChecks
         check(NetworkComparison.Decide(Samples("direct", 60), Samples("warp:FIXTURE", double.NaN)).UseWarp is null, "Invalid probe values are excluded");
         var oneWarpTarget = Enumerable.Repeat(Samples("warp:FIXTURE", 20)[0], 5);
         check(NetworkComparison.Decide(Samples("direct", 60), oneWarpTarget).UseWarp is null, "Repeated replies from one address cannot count as independent WARP targets");
+        check(NetworkComparison.Decide(Samples("direct", 60).Select(x => x with { City = "Same city" }), Samples("warp:FIXTURE", 20).Select(x => x with { City = "Same city" })).UseWarp is null,
+            "Multiple interfaces at one routing location cannot count as independent evidence");
         check(NetworkComparison.Decide(Samples("direct", 60), Samples("warp:FIXTURE", 20).Concat(Samples("warp:FIXTURE", 100))).UseWarp == false,
             "The repeated WARP pass prevents one transient fast pass from enabling a worse tunnel");
         Task.Run(async () =>
@@ -51,7 +53,10 @@ internal static class NetworkChecks
             var warp = new FakeWarp();
             int polls = 0;
             var settled = await RouteComparisonRunner.SwitchAsync(warp, true, _ => Task.FromResult<CloudflareTraceResult?>(new CloudflareTraceResult { Warp = ++polls < 9 ? "off" : "on" }), CancellationToken.None, 0, 0);
-            check(settled.WarpActive == true && polls == 11, "A slower WARP transition is allowed to settle and requires three verified states");
+            check(settled.WarpActive == true && polls == 12, "A slower WARP transition requires three verified states and a post-settling check");
+            warp = new FakeWarp(); polls = 0;
+            settled = await RouteComparisonRunner.SwitchAsync(warp, true, _ => Task.FromResult<CloudflareTraceResult?>(new CloudflareTraceResult { Warp = ++polls == 4 ? "off" : "on" }), CancellationToken.None, 0, 0);
+            check(settled.WarpActive == true && polls == 8, "A route that flaps during settling must be confirmed again before measurement");
             warp = new FakeWarp();
             Task<List<RoutingSample>> Faster(string route, CancellationToken token) => Task.FromResult(Samples(route, route == "direct" ? 60 : 20));
             var run = await RouteComparisonRunner.RunAsync(warp, false, warp.State, Faster, null, CancellationToken.None, 0, 0);
@@ -77,6 +82,20 @@ internal static class NetworkChecks
             run = await RouteComparisonRunner.RunAsync(warp, false, warp.State, (route, _) => Task.FromResult(new List<RoutingSample>
                 { new("2001:db8::1", "Fixture", "US", route, route == "direct" ? 90 : 1, 0, 0), new("2001:db8::2", "Fixture", "US", route, route == "direct" ? 90 : 1, 0, 0) }), null, CancellationToken.None, 0, 0);
             check(run.Decision?.UseWarp is null && run.FinalState?.WarpActive == false, "Fast IPv6 alone cannot recommend a tunnel for IPv4 gameplay");
+            warp = new FakeWarp();
+            run = await RouteComparisonRunner.RunAsync(warp, false, warp.State, (route, _) => { var samples = Samples(route, 20); if (route.StartsWith("warp:")) warp.Connected = false; return Task.FromResult(samples); }, null, CancellationToken.None, 0, 0);
+            check(run.Decision is null && run.Error.Contains("during measurement") && run.FinalState?.WarpActive == false, "A route change during probing rejects mixed measurements and restores the original route");
+            warp = new FakeWarp(); int connectedPasses = 0;
+            Task<CloudflareTraceResult?> ChangingIngress(CancellationToken token) => Task.FromResult<CloudflareTraceResult?>(new() { Warp = warp.Connected ? "on" : "off", Colo = connectedPasses >= 1 ? "SECOND" : "FIRST" });
+            run = await RouteComparisonRunner.RunAsync(warp, false, ChangingIngress, (route, _) => { if (route.StartsWith("warp:")) connectedPasses++; return Task.FromResult(Samples(route, route == "direct" ? 60 : 20)); }, null, CancellationToken.None, 0, 0);
+            check(run.Decision is null && run.Error.Length > 0 && run.FinalState?.WarpActive == false, "Measurements from changing WARP ingress cannot produce a recommendation");
+            warp = new FakeWarp();
+            Task<CloudflareTraceResult?> FinalIngress(CancellationToken token) => Task.FromResult<CloudflareTraceResult?>(new() { Warp = warp.Connected ? "on" : "off", Colo = warp.Changes.Count(x => x) >= 4 ? "SECOND" : "FIRST" });
+            run = await RouteComparisonRunner.RunAsync(warp, false, FinalIngress, Faster, null, CancellationToken.None, 0, 0);
+            check(run.Decision is null && run.Error.Contains("final WARP ingress") && run.FinalState?.WarpActive == false, "A different final ingress cannot apply the tested WARP recommendation");
+            warp = new FakeWarp(); int passes = 0;
+            run = await RouteComparisonRunner.RunAsync(warp, false, warp.State, (route, _) => Task.FromResult(++passes <= 2 ? Samples(route, route == "direct" ? 60 : 20) : new List<RoutingSample>()), null, CancellationToken.None, 0, 0);
+            check(run.Decision?.UseWarp is null && run.FinalState?.WarpActive == false, "One successful pass per route is insufficient to recommend WARP");
             if (verifiedPackage is not null)
             {
                 try { await WarpClient.VerifyPublisherAsync(Path.GetFullPath(verifiedPackage), CancellationToken.None); }

@@ -20,15 +20,17 @@ internal static class ServerBrowserChecks
         internal bool ListUnavailable;
         internal bool DatacentersUnavailable;
         internal int FailFirstRequests;
+        internal Func<HttpRequestMessage, string?>? ContentOverride;
+        internal Action<HttpRequestMessage>? OnRequest;
         internal List<HttpRequestMessage> Requests = new();
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
-            token.ThrowIfCancellationRequested(); Requests.Add(request);
+            token.ThrowIfCancellationRequested(); Requests.Add(request); OnRequest?.Invoke(request);
             bool metadata = request.RequestUri!.AbsolutePath == "/v1/servers/details";
             bool centers = request.RequestUri!.AbsolutePath == "/v1/datacenters/list";
             bool unavailable = metadata ? MetadataUnavailable : centers ? DatacentersUnavailable : ListUnavailable;
             var code = unavailable || FailFirstRequests-- > 0 ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.OK;
-            return Task.FromResult(new HttpResponseMessage(code) { Content = new StringContent(metadata ? Details : centers ? "[]" : PublicList) });
+            return Task.FromResult(new HttpResponseMessage(code) { Content = new StringContent(ContentOverride?.Invoke(request) ?? (metadata ? Details : centers ? "[]" : PublicList)) });
         }
     }
     internal static void Run(Action<bool, string> check)
@@ -43,6 +45,9 @@ internal static class ServerBrowserChecks
         DepthStrapServerBrowser.ApplyMetadata(parsed, Details);
         check(parsed.Count == 1 && parsed[0].Region == "Dallas, Texas, US" && parsed[0].DataCenterId == 42 && parsed[0].FirstSeen?.Kind == DateTimeKind.Utc,
             "Custom browser excludes full servers and applies public region/uptime metadata only to requested jobs");
+        parsed = DepthStrapServerBrowser.ParsePublicList("{\"data\":[null,{\"id\":\"22222222-2222-2222-2222-222222222222\",\"playing\":\"bad\",\"maxPlayers\":20},{\"id\":\"22222222-2222-2222-2222-222222222222\",\"playing\":4,\"maxPlayers\":20}]}");
+        DepthStrapServerBrowser.ApplyMetadata(parsed, "{\"servers\":[null,42,{\"server_id\":\"22222222-2222-2222-2222-222222222222\",\"city\":\"Dallas\"}]}");
+        check(parsed.Count == 1 && parsed[0].Region == "Dallas", "Malformed individual public/metadata records cannot discard valid servers on the same page");
         Task.Run(async () =>
         {
             handler.FailFirstRequests = 2;
@@ -53,14 +58,26 @@ internal static class ServerBrowserChecks
                 handler.Requests[0].RequestUri!.Query.Contains("cursor=cursor%2Bwith%26symbols") && handler.Requests[0].RequestUri!.Query.Contains("sortOrder=Asc"),
                 "Custom browsing never authenticates or requests join tickets and preserves encoded pagination and sort order");
             handler.MetadataUnavailable = true;
+            var recordedAt = DateTimeOffset.UtcNow.AddDays(-2);
+            KnownServerRegions.Remember(123, new[] { new KeyValuePair<string, KnownServerRegions.Entry>(Job, new("Dallas, Texas, US", 42, "fixture", recordedAt)) }, DateTimeOffset.UtcNow);
             result = await browser.FetchServerInstancesAsync(123);
             check(result.Servers.Single().Region == "Dallas, Texas, US", "Public metadata outage retains a verified cached region for the same place/job");
+            check(KnownServerRegions.ForPlace(123)[Job].RecordedAt == recordedAt, "Reading cached metadata cannot extend its expiry during an outage");
             result = await browser.FetchServerInstancesAsync(456);
             check(result.Servers.Single().Region == "Unknown", "Metadata outage still returns the public list and never copies another place's region");
             using var cancel = new CancellationTokenSource(); cancel.Cancel();
             bool cancelled = false;
             try { await browser.FetchServerInstancesAsync(123, cancellationToken: cancel.Token); } catch (OperationCanceledException) { cancelled = true; }
             check(cancelled, "Public browser cancellation exits immediately instead of retrying");
+            handler.MetadataUnavailable = false;
+            File.Delete(KnownServerRegions.FilePath);
+            Directory.CreateDirectory(KnownServerRegions.FilePath);
+            try
+            {
+                result = await browser.FetchServerInstancesAsync(123);
+                check(result.Servers.Single().Region == "Dallas, Texas, US", "An unwritable region cache cannot fail a successfully loaded public server list");
+            }
+            finally { Directory.Delete(KnownServerRegions.FilePath); }
         }).GetAwaiter().GetResult();
         var viewModel = new RegionSelectorViewModel(browser) { PlaceId = "123", UsePreferredRegionMode = false };
         check(viewModel.SearchCommand.CanExecute(null) && viewModel.Regions.Contains("All regions"), "ID Selector is enabled without remote configuration or an account cookie");
@@ -76,6 +93,29 @@ internal static class ServerBrowserChecks
         Task.Run(() => viewModel.InitializeRegionsAsync()).GetAwaiter().GetResult();
         check(viewModel.Regions.Contains("Dallas, US") && !viewModel.IsLoading,
             "The typed datacenter cache keeps its timestamp and restores region choices during an API outage");
+        handler.ContentOverride = request => request.RequestUri!.Host == "games.roblox.com" ? "{\"data\":[{\"id\":\"22222222-2222-2222-2222-222222222222\",\"playing\":4,\"maxPlayers\":20}],\"nextPageCursor\":null}" : null;
+        string? launched = null;
+        viewModel = new RegionSelectorViewModel(browser, uri => launched = uri) { PlaceId = "123", UsePreferredRegionMode = false };
+        Task.Run(() => viewModel.SearchCommand.ExecuteAsync(null)).GetAwaiter().GetResult();
+        var retained = viewModel.Servers.Single();
+        viewModel.PlaceId = "456";
+        check(!viewModel.HasSearched && viewModel.Servers.Count == 0 && !viewModel.LoadMoreCommand.CanExecute(null), "Changing the game invalidates previous results and pagination");
+        retained.JoinCommand!.Execute(null);
+        check(launched?.Contains("placeId=123&") == true, "A retained join action stays bound to the game its server belongs to");
+        handler.OnRequest = request => { if (request.RequestUri!.Host == "games.roblox.com") viewModel.PlaceId = "789"; };
+        Task.Run(() => viewModel.SearchCommand.ExecuteAsync(null)).GetAwaiter().GetResult();
+        check(viewModel.Servers.Count == 0 && viewModel.NextCursor.Length == 0 && !viewModel.IsLoading, "A game change during a request cancels it and rejects late results");
+        handler.OnRequest = null;
+        viewModel.SearchQuery = "New game search";
+        check(viewModel.PlaceId.Length == 0 && !viewModel.SearchCommand.CanExecute(null), "Typing another game name cannot search the previously selected game");
+        viewModel.StopPendingRequests();
+        handler.ContentOverride = request => request.RequestUri!.Host == "games.roblox.com" ? request.RequestUri.Query.Contains("cursor=next")
+            ? "{\"data\":[{\"id\":\"22222222-2222-2222-2222-222222222222\",\"playing\":4,\"maxPlayers\":20}],\"nextPageCursor\":null}"
+            : "{\"data\":[{\"id\":\"33333333-3333-3333-3333-333333333333\",\"playing\":20,\"maxPlayers\":20}],\"nextPageCursor\":\"next\"}" : null;
+        viewModel = new RegionSelectorViewModel(browser) { PlaceId = "123", UsePreferredRegionMode = true };
+        Task.Run(() => viewModel.SearchCommand.ExecuteAsync(null)).GetAwaiter().GetResult();
+        check(viewModel.Servers.Count == 1 && !viewModel.IsLoading, "Preferred browsing follows pagination after a page becomes empty when full servers are filtered");
+        handler.ContentOverride = null;
         new NetworkTestResult { Status = "Unavailable fixture" }.Save();
         check(App.Settings.Prop.NetworkSetupVersion == 0, "Failed initialization remains eligible for a fresh setup attempt");
         File.Delete(NetworkTestResult.FilePath);

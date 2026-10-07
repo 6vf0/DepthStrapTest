@@ -15,7 +15,7 @@ namespace Bloxstrap.Networking
             using var gate = NetworkHistory.Lock();
             string prefix = placeId + ":";
             return Read().Where(x => x.Key.StartsWith(prefix, StringComparison.Ordinal) && x.Value.RecordedAt > DateTimeOffset.UtcNow.AddDays(-7))
-                .ToDictionary(x => x.Key[prefix.Length..], x => x.Value);
+                .ToDictionary(x => x.Key[prefix.Length..], x => x.Value, StringComparer.OrdinalIgnoreCase);
         }
         internal static void Remember(long placeId, IEnumerable<KeyValuePair<string, Entry>> entries, DateTimeOffset startedAt)
         {
@@ -24,7 +24,7 @@ namespace Bloxstrap.Networking
             var all = Read();
             foreach (var (job, entry) in entries)
                 if (placeId > 0 && Guid.TryParse(job, out _) && !string.IsNullOrWhiteSpace(entry.Region) && entry.Region != "Unknown")
-                    all[placeId + ":" + job] = entry;
+                    all[placeId + ":" + Guid.Parse(job).ToString()] = entry;
             all = all.Where(x => x.Value.RecordedAt > DateTimeOffset.UtcNow.AddDays(-7)).OrderByDescending(x => x.Value.RecordedAt).Take(2000).ToDictionary();
             Directory.CreateDirectory(Paths.Cache);
             string temp = FilePath + ".tmp";

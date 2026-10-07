@@ -25,13 +25,15 @@ namespace Bloxstrap.UI.ViewModels.Settings
         private const string LOG_IDENT = "RegionSelectorViewModel";
         private readonly HashSet<string> _displayedServerIds = new();
         private readonly DepthStrapServerBrowser _fetcher;
+        private readonly Action<string> _launch;
+        private int _queryVersion;
         internal const string AllRegions = "All regions";
         private Dictionary<int, string>? _dcMap;
         private CancellationTokenSource? _searchDebounceCts;
         private CancellationTokenSource? _scanCts;
         public System.Windows.Input.ICommand CancelScanCommand => new RelayCommand(() => _scanCts?.Cancel());
 
-        [ObservableProperty] private bool _hasSearched;
+        [ObservableProperty][NotifyPropertyChangedFor(nameof(ServerListMessage))] private bool _hasSearched;
         [ObservableProperty][NotifyCanExecuteChangedFor(nameof(SearchCommand))] private string _placeId = "";
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(ServerListMessage), nameof(IsServerListEmptyAndNotLoading), nameof(ShowLoadingIndicator))]
@@ -40,11 +42,11 @@ namespace Bloxstrap.UI.ViewModels.Settings
         [NotifyPropertyChangedFor(nameof(ShowLoadingIndicator))]
         [NotifyCanExecuteChangedFor(nameof(SearchGamesCommand))] private bool _isGameSearchLoading;
         [ObservableProperty] private string _loadingMessage = "";
-        [ObservableProperty] private string _nextCursor = "";
+        [ObservableProperty][NotifyCanExecuteChangedFor(nameof(LoadMoreCommand))] private string _nextCursor = "";
         [ObservableProperty][NotifyCanExecuteChangedFor(nameof(SearchGamesCommand))] private string _searchQuery = "";
         [ObservableProperty] private OmniSearchContent? _selectedSearchResult;
         [ObservableProperty] private int _selectedSortOrder = 2;
-        [ObservableProperty] private int _lastFetchProcessedCount;
+        [ObservableProperty][NotifyPropertyChangedFor(nameof(ServerListMessage))] private int _lastFetchProcessedCount;
         [ObservableProperty] private string? _thumbnailUrl;
 
         // Preferred-region mode (competitive)
@@ -81,9 +83,10 @@ namespace Bloxstrap.UI.ViewModels.Settings
         public IAsyncRelayCommand SearchGamesCommand { get; }
 
         public RegionSelectorViewModel() : this(new DepthStrapServerBrowser()) { }
-        internal RegionSelectorViewModel(DepthStrapServerBrowser fetcher)
+        internal RegionSelectorViewModel(DepthStrapServerBrowser fetcher, Action<string>? launch = null)
         {
             _fetcher = fetcher;
+            _launch = launch ?? (uri => Process.Start(new ProcessStartInfo { FileName = uri, UseShellExecute = true }));
             Regions.Add(AllRegions);
             if (string.IsNullOrWhiteSpace(App.Settings.Prop.SelectedRegion)) App.Settings.Prop.SelectedRegion = AllRegions;
             Servers.CollectionChanged += (_, _) => {
@@ -99,15 +102,23 @@ namespace Bloxstrap.UI.ViewModels.Settings
 
         partial void OnSearchQueryChanged(string value)
         {
-            if (long.TryParse(value, out var id))
-            {
-                PlaceId = value;
-            }
+            PlaceId = long.TryParse(value, out _) ? value : "";
 
             _searchDebounceCts?.Cancel();
             _searchDebounceCts?.Dispose();
             _searchDebounceCts = new CancellationTokenSource();
             _ = DebouncedSearchTriggerAsync(_searchDebounceCts.Token);
+        }
+
+        partial void OnPlaceIdChanged(string value) => InvalidateResults();
+        partial void OnSelectedSortOrderChanged(int value) => InvalidateResults();
+        partial void OnUsePreferredRegionModeChanged(bool value) => InvalidateResults();
+        private void InvalidateResults()
+        {
+            _queryVersion++;
+            _scanCts?.Cancel();
+            Servers.Clear(); _displayedServerIds.Clear(); NextCursor = "";
+            HasSearched = false; LastFetchProcessedCount = 0; LoadingMessage = "";
         }
 
         partial void OnSelectedSearchResultChanged(OmniSearchContent? value)
@@ -122,7 +133,9 @@ namespace Bloxstrap.UI.ViewModels.Settings
             get => App.Settings.Prop.SelectedRegion;
             set
             {
+                if (App.Settings.Prop.SelectedRegion == value) return;
                 App.Settings.Prop.SelectedRegion = value!;
+                InvalidateResults();
                 OnPropertyChanged();
                 SearchCommand.NotifyCanExecuteChanged();
                 App.Settings.Save();
@@ -134,6 +147,7 @@ namespace Bloxstrap.UI.ViewModels.Settings
             if (string.IsNullOrWhiteSpace(value)) return;
 
             App.Settings.Prop.CompetitivePreferredCity = value.Trim();
+            InvalidateResults();
             App.Settings.Save();
         }
 
@@ -232,6 +246,7 @@ namespace Bloxstrap.UI.ViewModels.Settings
                 pagesChecked++;
                 if (string.IsNullOrWhiteSpace(NextCursor)) break;
             }
+            LoadingMessage = $"Loaded {Servers.Count} server(s) across {pagesChecked} page(s).";
         }
 
         /// <summary>
@@ -249,10 +264,9 @@ namespace Bloxstrap.UI.ViewModels.Settings
             // DC-id registry makes classification much stronger; best effort with a cap so the UI never stalls
             using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Clamp(App.Settings.Prop.PreferredRegionSearchTimeoutSeconds, 3, 120)));
             _scanCts = budget;
-            try { await CompetitiveRegionService.EnsureRegistryLoadedAsync().WaitAsync(budget.Token); }
-            catch (OperationCanceledException) { _scanCts = null; return; }
+            try { await CompetitiveRegionService.EnsureRegistryLoadedAsync(_fetcher).WaitAsync(budget.Token); }
+            catch (OperationCanceledException) { throw; }
 
-            var candidates = new List<(ServerInstance Server, RegionClassification Classification)>();
             int pagesChecked = 0;
 
             int timeoutSeconds = Math.Clamp(App.Settings.Prop.PreferredRegionSearchTimeoutSeconds, 3, 120);
@@ -260,60 +274,17 @@ namespace Bloxstrap.UI.ViewModels.Settings
 
             while (pagesChecked < maxPages && DateTime.Now < deadline)
             {
-                if (!long.TryParse(PlaceId, out var placeIdLong)) break;
-
-                FetchResult result;
-                try { result = await _fetcher.FetchServerInstancesAsync(placeIdLong, NextCursor, SelectedSortOrder, budget.Token); }
-                catch (OperationCanceledException) { break; }
-                if (result == null || result.Servers.Count == 0) break;
-
-                foreach (var s in result.Servers)
-                {
-                    if (!_displayedServerIds.Add(s.Id))
-                        continue;
-
-                    var cls = CompetitiveRegionService.Classify(
-                        s.Region, s.DataCenterId,
-                        source: s.DataCenterId.HasValue ? "Roblox DataCenterId" : s.RegionSource);
-
-                    candidates.Add((s, cls));
-                }
-
-                LastFetchProcessedCount += result.Servers.Count;
-                NextCursor = result.NextCursor;
+                await LoadServersAsync();
                 pagesChecked++;
 
                 // ideal match found -> stop scanning (spec: don't burn hundreds of pages)
-                bool idealFound = candidates.Any(c => c.Classification.Score >= 95);
+                bool idealFound = Servers.Any(c => c.Score >= 95);
                 if (idealFound || string.IsNullOrWhiteSpace(NextCursor))
                     break;
             }
 
-            // rank: preference score desc, then fewer players first (less crowded public servers are usually snappier)
-            var ranked = candidates
-                .OrderByDescending(c => c.Classification.Score)
-                .ThenBy(c => c.Server.Playing)
-                .ToList();
-
-            Servers.Clear();
-            int number = 1;
-            foreach (var (server, cls) in ranked)
-            {
-                Servers.Add(new ServerEntry
-                {
-                    Number = number++,
-                    ServerId = server.Id,
-                    Players = $"{server.Playing}/{server.MaxPlayers}",
-                    Region = cls.DisplayName,
-                    DataCenterId = server.DataCenterId,
-                    Uptime = server.UptimeDisplay,
-                    Score = cls.Score,
-                    Quality = cls.Quality.ToString(),
-                    JoinCommand = new RelayCommand(() => JoinServer(server.Id))
-                });
-            }
-
-            LoadingMessage = $"Checked {pagesChecked} page(s): {ranked.Count} server(s) ranked by region preference.";
+            RankDisplayedServers();
+            LoadingMessage = $"Checked {pagesChecked} page(s): {Servers.Count} server(s) ranked by region preference.";
             _scanCts = null;
         }
 
@@ -323,26 +294,31 @@ namespace Bloxstrap.UI.ViewModels.Settings
 
             if (resetCursor) NextCursor = "";
             if (!long.TryParse(PlaceId, out var placeIdLong)) return;
-
+            int version = _queryVersion;
             var result = await _fetcher.FetchServerInstancesAsync(placeIdLong, NextCursor, SelectedSortOrder, _scanCts?.Token ?? default);
+            _scanCts?.Token.ThrowIfCancellationRequested();
+            if (version != _queryVersion) throw new OperationCanceledException();
             if (result == null) return;
 
             int number = Servers.Count + 1;
             foreach (var s in result.Servers)
             {
                 string mapped = s.DataCenterId is int dc && _dcMap?.TryGetValue(dc, out var region) == true ? region : s.Region;
-                if ((SelectedRegion == AllRegions || string.Equals(mapped, SelectedRegion, StringComparison.OrdinalIgnoreCase) ||
+                if ((UsePreferredRegionMode || SelectedRegion == AllRegions || string.Equals(mapped, SelectedRegion, StringComparison.OrdinalIgnoreCase) ||
                     (mapped != "Unknown" && mapped.Split(',')[0].Trim().Equals(SelectedRegion.Split(',')[0].Trim(), StringComparison.OrdinalIgnoreCase))) && _displayedServerIds.Add(s.Id))
                 {
+                    var cls = UsePreferredRegionMode ? CompetitiveRegionService.Classify(s.Region, s.DataCenterId, source: s.RegionSource) : null;
                     Servers.Add(new ServerEntry
                     {
                         Number = number++,
                         ServerId = s.Id,
                         Players = $"{s.Playing}/{s.MaxPlayers}",
-                        Region = s.Region,
+                        Region = cls?.DisplayName ?? (mapped != "Unknown" ? mapped : s.Region),
                         DataCenterId = s.DataCenterId,
                         Uptime = s.UptimeDisplay,
-                        JoinCommand = new RelayCommand(() => JoinServer(s.Id))
+                        Score = cls?.Score ?? 0,
+                        Quality = cls?.Quality.ToString() ?? "Unknown",
+                        JoinCommand = new RelayCommand(() => JoinServer(placeIdLong, s.Id))
                     });
                 }
             }
@@ -351,16 +327,17 @@ namespace Bloxstrap.UI.ViewModels.Settings
             NextCursor = result.NextCursor;
         }
 
-        private void JoinServer(string serverId)
+        private void RankDisplayedServers()
         {
-            if (!long.TryParse(PlaceId, out var placeId)) return;
+            var ranked = Servers.OrderByDescending(x => x.Score).ThenBy(x => int.TryParse(x.Players.Split('/')[0], out int count) ? count : int.MaxValue).ToList();
+            Servers.Clear();
+            for (int i = 0; i < ranked.Count; i++) { ranked[i].Number = i + 1; Servers.Add(ranked[i]); }
+        }
+        private void JoinServer(long placeId, string serverId)
+        {
             try
             {
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = $"roblox://experiences/start?placeId={placeId}&gameInstanceId={serverId}",
-                    UseShellExecute = true
-                });
+                _launch($"roblox://experiences/start?placeId={placeId}&gameInstanceId={serverId}");
             }
             catch (Exception ex) { App.Logger.WriteException(LOG_IDENT, ex); }
         }
@@ -443,7 +420,8 @@ namespace Bloxstrap.UI.ViewModels.Settings
             try
             {
                 for (int i = 0; i < 5 && !string.IsNullOrWhiteSpace(NextCursor); i++) await LoadServersAsync();
-                LoadingMessage = $"Loaded {Servers.Count} server(s). Unknown regions are shown only under All regions.";
+                if (UsePreferredRegionMode) RankDisplayedServers();
+                LoadingMessage = UsePreferredRegionMode ? $"Loaded {Servers.Count} server(s), ranked by region preference." : $"Loaded {Servers.Count} server(s). Unknown regions are shown only under All regions.";
             }
             catch (OperationCanceledException) { LoadingMessage = "Search stopped. Available results are retained."; }
             catch (Exception ex) { App.Logger.WriteException(LOG_IDENT, ex); LoadingMessage = "More servers could not be loaded. Try again."; }
