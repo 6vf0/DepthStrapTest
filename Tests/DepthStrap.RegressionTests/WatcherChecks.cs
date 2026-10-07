@@ -1,0 +1,100 @@
+using System.Diagnostics;
+using System.IO;
+using System.Reflection;
+using Bloxstrap;
+using Bloxstrap.Competitive;
+using Bloxstrap.Enums;
+using Bloxstrap.Models;
+using Bloxstrap.Models.Persistable;
+using Bloxstrap.Roblox;
+using Bloxstrap.UI.ViewModels.Settings;
+
+internal static class WatcherChecks
+{
+    internal static void Run(Action<bool, string> check)
+    {
+        string root = Path.Combine(Paths.Base, "startup-fixture");
+        long startTime = DateTime.UtcNow.AddSeconds(2).Ticks;
+        var workers = Enumerable.Range(0, 8).Select(_ =>
+        {
+            var info = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
+            info.ArgumentList.Add(Assembly.GetExecutingAssembly().Location);
+            info.ArgumentList.Add("--startup-log-worker"); info.ArgumentList.Add(root); info.ArgumentList.Add(startTime.ToString());
+            return Process.Start(info)!;
+        }).ToList();
+        foreach (var worker in workers)
+        {
+            check(worker.WaitForExit(10000) && worker.ExitCode == 0, "Simultaneous launcher/watcher helpers each initialize their diagnostic log");
+            worker.Dispose();
+        }
+        check(Directory.GetFiles(Path.Combine(root, "Logs"), "DepthStrap_*.log").Length == 8, "Eight simultaneous helper processes retain eight distinct logs without treating another helper as a duplicate launch");
+
+        App.Settings.Prop = new Settings { CompetitiveModeEnabled = true, CompetitiveNetworkMonitorEnabled = true,
+            CompetitiveCloudflareDetectionEnabled = false, CompetitiveIcmpEnabled = false, CompetitiveTracerouteEnabled = false,
+            AdaptiveRegionPreferencesEnabled = false, ShowServerDetails = false, ShowServerUptime = false, AutoRejoin = false,
+            CompetitivePreferredCity = "Dallas", PreferNorthAmericaOnly = true, AutoLeaveBadChimeRegion = true };
+        using var activity = new ActivityWatcher("fixture.log");
+        using var network = new CompetitiveNetworkMonitor(activity);
+        using var regions = new CompetitiveRegionMonitor(network);
+        var resolved = new TaskCompletionSource<CompetitiveRegionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var autoLog = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var diagnosed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        network.DiagnosticsCompleted += (_, _) => diagnosed.TrySetResult();
+        regions.OnRegionEvaluated += (_, result) => resolved.TrySetResult(result);
+        network.AutoLogHandler = evt =>
+        {
+            // Exercise the production decision without operating a real Roblox process.
+            autoLog.TrySetResult(BadRegionAutoLog.ShouldLeave(evt, App.Settings.Prop, activity.Data.JobId, DateTime.Now,
+                CompetitiveRegionService.Classify(evt.Location, source: evt.RegionSource)));
+            return Task.FromResult(false);
+        };
+        GlobalCache.ServerLocation["192.0.2.2"] = "London, United Kingdom";
+        string job = "11111111-1111-1111-1111-111111111111";
+        activity.ReadLogEntry($"2026-10-07T14:42:41Z,0.0,1234,6,Warning [FLog::Output] ! Joining game '{job}' place 999001 at 192.0.2.1");
+        activity.ReadLogEntry("2026-10-07T14:42:41Z,0.0,1234,6,Info [FLog::GameJoinLoadTime] Report game_join_loadtime: placeid:999001, universeid:1359573625, userid:1");
+        activity.ReadLogEntry("2026-10-07T14:42:41Z,0.0,1234,7,Debug [FLog::Network] UDMUX Address = 192.0.2.2, Port = 52535 | RCC Server Address = 192.0.2.1, Port = 52535");
+        activity.ReadLogEntry("2026-10-07T14:42:41Z,0.0,1234,7 [FLog::Network] serverId: 192.0.2.2|52535");
+        check(activity.InGame && activity.Data.UniverseId == CompetitiveRegionService.DeepwokenUniverseId && activity.Data.UdmuxAddress == "192.0.2.2",
+            "Modern log severity prefixes still produce a confirmed Deepwoken subplace join and UDMUX endpoint");
+        check(resolved.Task.Wait(TimeSpan.FromSeconds(5)), "A parsed game join reaches the region-warning pipeline");
+        check(CompetitiveRegionMonitor.BuildNotification(resolved.Task.Result) is not null, "A known foreign Deepwoken subplace produces the bad-region warning");
+        check(autoLog.Task.Wait(TimeSpan.FromSeconds(5)) && autoLog.Task.Result, "The same confirmed bad join reaches the opt-in autolog decision");
+        check(diagnosed.Task.Wait(TimeSpan.FromSeconds(5)), "The join completes diagnostics before lifecycle checks begin");
+        var viewModel = new CompetitivePageViewModel(); viewModel.PollSession();
+        check(viewModel.SessionLocation.Contains("London") && viewModel.SessionUdmux.Contains("192.0.2.2"), "Current Session receives the live watcher file and displays region and endpoint");
+        var current = network.LatestEvent!;
+        CompetitiveNetworkState.Write(current with { ProcessId = 1234 });
+        CompetitiveNetworkState.ClearIfOwned(0);
+        check(CompetitiveNetworkState.TryRead()?.ProcessId == 1234, "One client cannot clear Current Session owned by another client");
+        CompetitiveNetworkState.Write(current);
+        viewModel.PollSession();
+        activity.ReadLogEntry("2026-10-07T14:42:51Z,0.0,1234,7,Info [FLog::Network] Time to disconnect replication data: 0.1");
+        viewModel.PollSession();
+        check(!activity.InGame && CompetitiveNetworkState.TryRead() is null && viewModel.SessionLocation == "—", "Leaving the game clears the live session instead of showing the old server");
+        var rejoined = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        network.DiagnosticsCompleted += (_, _) => rejoined.TrySetResult();
+        activity.ReadLogEntry($"2026-10-07T14:43:01Z,0.0,1234,6,Warning [FLog::Output] ! Joining game '{job}' place 999001 at 192.0.2.1");
+        activity.ReadLogEntry("2026-10-07T14:43:01Z,0.0,1234,6,Info [FLog::GameJoinLoadTime] Report game_join_loadtime: placeid:999001, universeid:1359573625, userid:1");
+        activity.ReadLogEntry("2026-10-07T14:43:01Z,0.0,1234,7,Debug [FLog::Network] UDMUX Address = 192.0.2.2, Port = 52535 | RCC Server Address = 192.0.2.1, Port = 52535");
+        activity.ReadLogEntry("2026-10-07T14:43:01Z,0.0,1234,7 [FLog::Network] serverId: 192.0.2.2|52535");
+        check(rejoined.Task.Wait(TimeSpan.FromSeconds(5)), "Rejoining the same server is evaluated again after leaving rather than discarded as a duplicate");
+        viewModel.PollSession();
+        check(viewModel.SessionLocation.Contains("London"), "Current Session loads again when the same place/job is rejoined");
+        CompetitiveNetworkState.Write(current with { ProcessId = 1234 });
+        network.Dispose();
+        check(CompetitiveNetworkState.TryRead()?.ProcessId == 1234, "Exiting a watcher preserves another client's session");
+        CompetitiveNetworkState.ClearIfOwned(1234);
+        CompetitiveNetworkState.Write(current with { ProcessId = int.MaxValue });
+        viewModel.PollSession();
+        check(viewModel.SessionLocation == "—", "A stale state file from a terminated client cannot appear as Current Session even when its watcher exited abruptly");
+        CompetitiveNetworkState.ClearIfOwned(int.MaxValue);
+        check(ActivityWatcher.IsPlayerSessionLog("fixture_Player_123_last.log") && !ActivityWatcher.IsPlayerSessionLog("fixture_Player_CrashHandler_last.log"),
+            "Crash-handler logs cannot be selected as the Player activity log");
+        var launched = DateTime.Now.AddMinutes(-1);
+        check(ActivityWatcher.IsSessionLogTime(launched.AddSeconds(5), launched.AddSeconds(-2), DateTime.Now) &&
+            !ActivityWatcher.IsSessionLogTime(launched.AddMinutes(-1), launched.AddSeconds(-2), DateTime.Now),
+            "Delayed watcher startup still accepts this client's log while excluding an earlier session");
+        GlobalCache.ServerLocation.TryRemove("192.0.2.2", out _);
+        App.Settings.Prop = new Settings();
+    }
+}

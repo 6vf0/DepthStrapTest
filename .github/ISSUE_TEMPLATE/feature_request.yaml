@@ -1,0 +1,14 @@
+name: Feature request
+title: "[REQ] "
+description: Suggest a DepthStrap improvement
+body:
+  - type: markdown
+    attributes:
+      value: Please search existing DepthStrap issues before submitting a request.
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to improve?
+      description: Describe the use case and the behavior you would like.
+    validations:
+      required: true

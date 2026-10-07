@@ -1,0 +1,35 @@
+name: Bug report
+title: "[BUG] "
+description: Report a DepthStrap problem
+body:
+  - type: input
+    id: version
+    attributes:
+      label: DepthStrap version
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows version
+      placeholder: "Windows 11 24H2"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include the expected result and any error message.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include relevant profile, network and FastFlag settings.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Optional logs or screenshots
+      description: Remove account details, authentication tokens and public IP addresses before sharing.

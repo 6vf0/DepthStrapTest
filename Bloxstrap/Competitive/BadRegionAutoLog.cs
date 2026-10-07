@@ -1,0 +1,30 @@
+namespace Bloxstrap.Competitive
+{
+    internal static class BadRegionAutoLog
+    {
+        internal static bool ShouldLeave(Models.CompetitiveNetworkEvent result, Settings settings,
+            string currentJob, DateTime now, RegionClassification classification)
+        {
+            if (!settings.AutoLeaveBadChimeRegion || !settings.CompetitiveModeEnabled || !IsDeepwoken(result) ||
+                string.IsNullOrEmpty(currentJob) || result.JobId != currentJob || classification.IsConfiguredRegion ||
+                classification.Quality == RegionQuality.Unknown || result.RegionSource == "Unknown" || result.RegionSource.Length == 0 ||
+                now < result.Timestamp || now - result.Timestamp > TimeSpan.FromSeconds(60)) return false;
+            if (!string.IsNullOrWhiteSpace(settings.CompetitivePreferredCity) || settings.CompetitiveFallbackCities.Any(x => !string.IsNullOrWhiteSpace(x))) return true;
+            // Before a city has been measured, only a confirmed outside-area join qualifies.
+            return (classification.Quality is RegionQuality.Bad or RegionQuality.Poor) &&
+                (settings.PreferNorthAmericaOnly || settings.PreferEuropeOnly);
+        }
+
+        internal const string HomeUri = "roblox://navigation/home";
+        // Entry place verified against Roblox's public universe API. Subplaces are identified by universe,
+        // never by a fixed list of Layer/Chime place IDs; reserved destinations cannot be resumed by URI.
+        internal const string RejoinUri = "roblox://experiences/start?placeId=4111023553";
+        internal static bool IsDeepwoken(Models.CompetitiveNetworkEvent result) =>
+            result.IsDeepwoken && result.UniverseId == CompetitiveRegionService.DeepwokenUniverseId;
+        internal static bool ShouldRejoin(Models.CompetitiveNetworkEvent result, Settings settings) =>
+            settings.AutoLeaveBadChimeRegion && IsDeepwoken(result);
+        internal static bool IsIdleHomeLog(string log) =>
+            !log.Contains("[FLog::Output] ! Joining game") && !log.Contains("GameJoinUtil::initiateTeleportToPlace") &&
+            !log.Contains("GameJoinUtil::joinGamePostPrivateServer") && !log.Contains("GameJoinUtil::initiateTeleportToReservedServer");
+    }
+}

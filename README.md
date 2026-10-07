@@ -1,0 +1,53 @@
+# DepthStrap 1.0
+
+A Windows Roblox launcher with a Crimson Contract theme, a custom stone and crimson icon, Competitive and Balanced profiles, and local server-route learning.
+
+## Install
+
+Download the Windows package from [DepthStrap releases](https://github.com/deepisthatdeep/DepthStrap/releases).
+
+Run `DepthStrap.exe` from the Windows release package. It installs under `%LOCALAPPDATA%\DepthStrap`, registers Roblox launch links and opens network setup during installation. Setup downloads and verifies the official Cloudflare WARP package, installs it through Windows Installer, and compares normal routing against WARP. Accept Cloudflare's application terms and privacy policy before its installation and registration; Windows may request administrator permission. No city is preset. Without usable measurements, Roblox matchmaking remains available and testing can be retried.
+
+WARP downloads directly from Cloudflare during setup rather than being redistributed inside the ZIP. WARP routes the computer's Internet traffic through Cloudflare; Cloudflare manages its service, registration and own logs. DepthStrap's network reset retains WARP's installation and registration.
+
+The standalone Windows x64 build includes .NET and requires no separate runtime installation. This build is unsigned and has no app auto-update feed configured.
+
+## Features
+
+- Competitive: graphics quality 3, FPS matched to the monitor's maximum supported refresh rate at its current resolution, High process priority, performance QoS, MSAA 1x, minimum supported mesh detail distances, no grass, texture quality 0 and automatic renderer selection. The quality lock is released when the client closes. Preset-owned settings are backed up and restored when the profile is disabled; later manual edits are preserved.
+- Balanced: moderate rendering reductions and monitor-matched FPS, with available adaptive networking retained.
+- FastFlags: searchable name/value list, direct editing, add/paste JSON, file import, export/copy JSON, delete/clear and undo/redo. Imports are validated before changing any flags. Save applies edits on the next launch. Roblox may ignore flags outside its allowlist; Competitive manages its rendering flags while active.
+- Normal-versus-WARP comparison during installation and from settings. Every published operational Roblox IPv4 and IPv6 exchange interface is considered, without a per-city address cap. Each route receives three passes with 24 probes per target, at least 45 seconds between pass starts, three route-state confirmations and 15 seconds to settle after switching. Allow 6–15 minutes; unresponsive targets can extend the test up to its 45-minute budget. IPv4 matched targets determine the recommendation for the observed IPv4 gameplay endpoints; IPv6 results expand coverage without overriding an unavailable IPv4 comparison. Errors and cancellation restore the starting WARP state. The result popup reports the final verified state, and a manual WARP toggle remains available. Failed discovery remains eligible for setup on the next launch.
+- Local region learning from usable server measurements by time of day and route. Prefer NA (US, Canada and Mexico) or Prefer EU is selected automatically from normal-route location, with a manual override. Primary and fallback cities come from measurements. Sample thresholds and hysteresis prevent sparse or noisy data from continually changing preferences. Some datacenters, including Mexico at the time of verification, have no published IPv4 exchange probe; those regions are learned from actual joins instead of invented ping estimates.
+- Reset Network clears network logs, traceroutes, region history and learned preferences before a new comparison. Late pre-reset diagnostic results are rejected. Tests enable or disable available network capabilities. Disconnect other VPNs or proxies before testing for an accurate baseline and location estimates.
+- Custom DepthStrap ID Selector with public Roblox server lists and current public region metadata from [RoValra](https://www.rovalra.com). Browsing requires no account access, authentication cookie, browser automation or Froststrap service. Verified place/job regions from confirmed joins provide a local fallback. All regions includes unknown locations; specific-region filters and automatic preferred-server selection use known regions. Failed metadata requests retain the public list, errors release loading controls, and scans are bounded and cancellable. Automatic selection is limited to confirmed Deepwoken launches; explicit server selections and private joins retain their original parameters. When region metadata is unavailable, normal Roblox matchmaking remains available.
+- Session details including UDMUX/RCC addresses, resolved regions, WARP state, supplementary ICMP RTT and local history. Known bad Deepwoken joins are logged and can show a warning. A single optional autolog-and-rejoin toggle leaves the affected client, reopens Roblox Home and shows a cancelable ten-second countdown, then opens Deepwoken's entry place through normal preferred-server selection. It requires a confirmed Deepwoken universe, covering the Depths, Layer 2 and all Chime subplaces; other games never trigger it. It preserves other clients and stops rejoining after three attempts in ten minutes. Closing Home or starting another game cancels the pending rejoin. Leaving may forfeit a run or match; reserved destinations cannot be resumed. Autolog is off by default.
+- Pause Roblox updates is on by default after the first Player install. Downgrade from [WEAO RDD](https://rdd.weao.gg/), retained builds or an official `version-` ID. RDD supplies the previous-version catalog; packages use Roblox deployment manifests and CDN. Roblox may reject older clients.
+- Multi-client launches use a helper that owns both Roblox singleton mutexes before launching, retains them across subsequent clients and releases them after the last client exits. Close clients launched without the helper before enabling it.
+- Crimson Contract artwork with the GloryToBloodrend watermark, plus simple Dark, Light, Blue, Purple, Green, Orange, Pink and system color themes. Custom branding covers the installer, launcher, tray and executable icon.
+- Roblox input, audio and accessibility settings; launch behavior, update/channel controls and optional file cleanup. CPU priority is controlled only in Roblox Settings, and automatic FPS displays the monitor cap.
+
+Competitive uses supported local rendering flags. Custom imports are preserved and submitted as entered; Roblox may ignore them. Game-controlled streaming distance and network traffic cannot be universally overridden. ICMP probes describe routing, not Roblox gameplay latency or UDP loss. Performance varies by device, connection and Roblox version.
+
+## Data
+
+The release contains no personal settings, accounts, cookies, session logs or learned preferences. Test results and history are created locally for each installation. Full public egress IP logging is off by default. Roblox account permission controls and cookie-reading/authentication code are removed. Logs and learned data are stored under the installation directory. GlobalBasicSettings remains in Roblox's own directory.
+
+## Build and verify
+
+Use the .NET 10 SDK on Windows. Clone this repository with `git clone --recurse-submodules https://github.com/deepisthatdeep/DepthStrap.git`, or extract the source release archive, which includes dependency source.
+
+```powershell
+dotnet build DepthStrap.slnx -c Release
+dotnet Tests/DepthStrap.RegressionTests/bin/Release/net10.0-windows/DepthStrap.RegressionTests.dll artifacts/previews/DepthStrap-Crimson.png
+dotnet publish Bloxstrap/Bloxstrap.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:DebugSymbols=false -o artifacts/publish
+pwsh Scripts/package-release.ps1
+```
+
+Checks isolate settings and fake Roblox files under `artifacts/previews`. They do not install the app, launch Roblox or change real Roblox settings. Checks cover profile restoration, ranking, URI preservation, rollback validation, log concurrency/privacy, simultaneous helper startup, the parsed-join-to-session/warning/autolog pipeline, theme migration, layout, FastFlags validation, capability policy, A/B selection, cancellation/failure restoration, scoped reset and Deepwoken-only autolog/rejoin decisions across subplaces. Route-control tests use a fake WARP client. An optional `--verify-warp-package path/to/Cloudflare-WARP.msi` check exercises the production Windows signature verifier against a downloaded official MSI. An optional `--verify-public-network` check loads the live routing targets, datacenter registry and public Deepwoken server list without switching WARP or launching Roblox. Interface previews render without showing a window. Actual elevated WARP installation, live multi-client behavior and the Home/rejoin handoff still require a Windows gameplay check.
+
+Cloudflare's [Windows setup documentation](https://developers.cloudflare.com/warp-client/get-started/windows/), [application terms](https://www.cloudflare.com/application/terms/) and [privacy policy](https://www.cloudflare.com/application/privacypolicy/) apply to WARP. DepthStrap is not affiliated with Roblox or Cloudflare.
+
+## Licensing
+
+See `NOTICE.md`, `LICENSE`, `LICENSE-MIT`, `LICENSE-UNLICENSE`, `LICENSE-INITIAL-REPOSITORY` and dependency notices. Existing copyright notices are retained. Ship the corresponding source archive with the executable.
