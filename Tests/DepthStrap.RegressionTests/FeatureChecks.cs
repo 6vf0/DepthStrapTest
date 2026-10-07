@@ -15,6 +15,27 @@ internal static class FeatureChecks
     {
         check(ReleaseMigration.IsPrototypeToFirstRelease("DepthStrap", "1.5.1", "1.0.0") && !ReleaseMigration.NeedsLegacyMigrations("DepthStrap") && ReleaseMigration.NeedsLegacyMigrations("Froststrap"), "DepthStrap 1.0 can replace the prototype without triggering upstream version migrations");
         var settings = new Settings();
+        var unavailable = new NetworkTestResult { RegionsAvailable = false };
+        unavailable.Apply(settings);
+        check(settings.ChimeRegionMonitorEnabled && settings.WarnOnBadChimeRegion,
+            "An unavailable setup registry does not disable live region warnings");
+        var migrated = new Settings { ChimeRegionMonitorEnabled = false, WarnOnBadChimeRegion = false, AutoLeaveBadChimeRegion = true };
+        check(RegionMonitoringPolicy.RepairLegacySetup(migrated, unavailable) && migrated.WarnOnBadChimeRegion &&
+            migrated.ChimeRegionMonitorEnabled && migrated.AutoLeaveBadChimeRegion,
+            "Migration repairs alerts disabled by an old failed setup without changing autolog consent");
+        migrated.WarnOnBadChimeRegion = migrated.ChimeRegionMonitorEnabled = false;
+        check(!RegionMonitoringPolicy.RepairLegacySetup(migrated, unavailable) && !migrated.WarnOnBadChimeRegion,
+            "Intentional alert choices remain unchanged after the one-time setup repair");
+        new NetworkTestResult { RegionsAvailable = true }.Apply(migrated);
+        check(!migrated.WarnOnBadChimeRegion && !migrated.ChimeRegionMonitorEnabled,
+            "Follow-up network tests preserve disabled alert preferences");
+        var alertsOnly = new Settings { CompetitiveNetworkMonitorEnabled = false, ChimeRegionMonitorEnabled = false,
+            WarnOnBadChimeRegion = true, AutoLeaveBadChimeRegion = false };
+        check(RegionMonitoringPolicy.NeedsWatcher(alertsOnly) && RegionMonitoringPolicy.NeedsAlerts(alertsOnly),
+            "Warnings independently start their required watcher without diagnostics");
+        alertsOnly.WarnOnBadChimeRegion = false; alertsOnly.AutoLeaveBadChimeRegion = true;
+        check(RegionMonitoringPolicy.NeedsWatcher(alertsOnly) && RegionMonitoringPolicy.NeedsAlerts(alertsOnly),
+            "Autolog independently starts its required watcher without other monitoring toggles");
         string fontFixture = Path.Combine(Paths.Cache, "font-fixture.ttf");
         Directory.CreateDirectory(Paths.Cache);
         File.WriteAllBytes(fontFixture, new byte[] { 0, 1, 0, 0, 1, 2, 3, 4 });

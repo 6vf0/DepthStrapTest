@@ -36,6 +36,8 @@ namespace Bloxstrap.Roblox
         private bool _teleportMarker = false;
         private bool _reservedTeleportMarker = false;
         private bool _shouldAutoRejoin = false;
+        private string? _joinAddress;
+        private string? _confirmedAddress;
         internal bool SuppressAutoRejoin { get; set; }
 
         private static readonly string GameHistoryCachePath = Path.Combine(Paths.Cache, "GameHistory.json");
@@ -43,6 +45,7 @@ namespace Bloxstrap.Roblox
 
         public event EventHandler<string>? OnLogEntry;
         public event EventHandler? OnGameJoin;
+        public event EventHandler? OnConnectionUpdated;
         public event EventHandler? OnGameLeave;
         public event EventHandler? OnStudioPlaceOpened;
         public event EventHandler? OnStudioPlaceClosed;
@@ -117,6 +120,12 @@ namespace Bloxstrap.Roblox
 
         public async void Start()
         {
+            try { await RunAsync(); }
+            catch (Exception ex) { App.Logger.WriteException("ActivityWatcher::Start", ex); }
+        }
+
+        internal async Task RunAsync()
+        {
             const string LOG_IDENT = "ActivityWatcher::Start";
 
             // okay, here's the process:
@@ -169,9 +178,18 @@ namespace Bloxstrap.Roblox
                 logFileInfo = new FileInfo(LogLocation);
             }
 
+            FileStream? logFileStream = null;
+            while (!IsDisposed && logFileStream is null)
+            {
+                try { logFileStream = logFileInfo.Open(FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    App.Logger.WriteLine(LOG_IDENT, $"Log not ready; retrying: {ex.Message}");
+                    await Task.Delay(1000);
+                }
+            }
+            if (logFileStream is null) return;
             OnLogOpen?.Invoke(this, EventArgs.Empty);
-
-            var logFileStream = logFileInfo.Open(FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
 
             App.Logger.WriteLine(LOG_IDENT, $"Opened {LogLocation}");
 
@@ -295,11 +313,19 @@ namespace Bloxstrap.Roblox
 
                 OnAppClose?.Invoke(this, EventArgs.Empty);
 
-                if (Data.PlaceId != 0 && !InGame)
+                if (InGame)
                 {
-                    App.Logger.WriteLine(LOG_IDENT, "User appears to be leaving from a cancelled/errored join");
+                    InGame = false;
+                    Data.TimeLeft = DateTime.Now;
+                    AddToHistory(Data);
+                    OnGameLeave?.Invoke(this, EventArgs.Empty);
+                }
+                if (Data.PlaceId != 0)
+                {
                     Data = new();
                 }
+                _joinAddress = _confirmedAddress = null;
+                _teleportMarker = _reservedTeleportMarker = _shouldAutoRejoin = false;
 
                 return;
             }
@@ -328,6 +354,64 @@ namespace Bloxstrap.Roblox
                 }
             }
 
+            // Teleports and replacement joins do not always have a preceding disconnect line.
+            if (logMessage.StartsWith(GameTeleportingEntry) || logMessage.StartsWith(GameJoiningReservedServerEntry))
+            {
+                _teleportMarker = true;
+                if (logMessage.StartsWith(GameJoiningReservedServerEntry)) _reservedTeleportMarker = true;
+                return;
+            }
+            if (logMessage.StartsWith(GameJoiningEntry))
+            {
+                var match = Regex.Match(logMessage, GameJoiningEntryPattern);
+                if (!match.Success) return;
+                long place = long.Parse(match.Groups[2].Value);
+                string job = match.Groups[1].Value;
+                if (Data.PlaceId == place && Data.JobId == job) return;
+                if (InGame)
+                {
+                    InGame = false;
+                    Data.TimeLeft = DateTime.Now;
+                    AddToHistory(Data);
+                    OnGameLeave?.Invoke(this, EventArgs.Empty);
+                }
+                if (Data.PlaceId != 0) Data = new();
+                Data.PlaceId = place;
+                Data.JobId = job;
+                Data.MachineAddress = _joinAddress = match.Groups[3].Value;
+                _confirmedAddress = null;
+                _shouldAutoRejoin = false;
+                Data.IsTeleport = _teleportMarker;
+                if (_reservedTeleportMarker) Data.ServerType = ServerType.Reserved;
+                _teleportMarker = _reservedTeleportMarker = false;
+                if (App.Settings.Prop.ShowServerDetails && Data.MachineAddressValid) _ = Data.QueryServerLocation();
+                if (App.Settings.Prop.ShowServerUptime) _ = Data.QueryServerTime();
+                App.Logger.WriteLine(LOG_IDENT, $"Joining Game ({Data})");
+                return;
+            }
+            if (Data.PlaceId != 0 && logMessage.StartsWith(GameJoiningUDMUXEntry))
+            {
+                var match = Regex.Match(logMessage, GameJoiningUDMUXPattern);
+                if (!match.Success || match.Groups[3].Value != _joinAddress) return;
+                bool updateConfirmed = InGame && Data.UdmuxAddress != match.Groups[1].Value;
+                Data.UdmuxAddress = match.Groups[1].Value;
+                Data.UdmuxPort = int.Parse(match.Groups[2].Value);
+                Data.RccAddress = match.Groups[3].Value;
+                Data.RccPort = int.Parse(match.Groups[4].Value);
+                Data.MachineAddress = Data.UdmuxAddress;
+                TryConfirmJoin();
+                if (updateConfirmed) OnConnectionUpdated?.Invoke(this, EventArgs.Empty);
+                return;
+            }
+            if (!InGame && Data.PlaceId != 0 && logMessage.StartsWith(GameJoinedEntry))
+            {
+                var match = Regex.Match(logMessage, GameJoinedEntryPattern);
+                if (!match.Success) return;
+                _confirmedAddress = match.Groups[1].Value;
+                TryConfirmJoin();
+                return;
+            }
+
             if (!InGame && Data.PlaceId == 0)
             {
                 // We are not in a game, nor are in the process of joining one
@@ -348,99 +432,6 @@ namespace Bloxstrap.Roblox
                     }
 
                     Data.AccessCode = match.Groups[1].Value;
-                }
-                else if (logMessage.StartsWith(GameJoiningEntry))
-                {
-                    Match match = Regex.Match(logMessage, GameJoiningEntryPattern);
-
-                    if (match.Groups.Count != 4)
-                    {
-                        App.Logger.WriteLine(LOG_IDENT, $"Failed to assert format for game join entry");
-                        App.Logger.WriteLine(LOG_IDENT, logMessage);
-                        return;
-                    }
-
-                    InGame = false;
-                    Data.PlaceId = long.Parse(match.Groups[2].Value);
-                    Data.JobId = match.Groups[1].Value;
-                    Data.MachineAddress = match.Groups[3].Value;
-
-                    // fresh join: the UDMUX/RCC endpoints are not known yet.
-                    // (mirrors the state reset in RobloxRouteLab.ps1 Capture-ServerEvent)
-                    Data.UdmuxAddress = null;
-                    Data.UdmuxPort = null;
-                    Data.RccAddress = null;
-                    Data.RccPort = null;
-
-                    if (App.Settings.Prop.ShowServerDetails && Data.MachineAddressValid)
-                        _ = Data.QueryServerLocation();
-
-                    if (App.Settings.Prop.ShowServerUptime && Data.JobId != null)
-                        _ = Data.QueryServerTime();
-
-                    if (_teleportMarker)
-                    {
-                        Data.IsTeleport = true;
-                        _teleportMarker = false;
-                    }
-
-                    if (_reservedTeleportMarker)
-                    {
-                        Data.ServerType = ServerType.Reserved;
-                        _reservedTeleportMarker = false;
-                    }
-
-                    App.Logger.WriteLine(LOG_IDENT, $"Joining Game ({Data})");
-                }
-            }
-            else if (!InGame && Data.PlaceId != 0)
-            {
-                // We are not confirmed to be in a game, but we are in the process of joining one
-
-                if (logMessage.StartsWith(GameJoiningUDMUXEntry))
-                {
-                    var match = Regex.Match(logMessage, GameJoiningUDMUXPattern);
-
-                    // the RCC address should be the machine address from the join line;
-                    // when it is, UDMUX fronts the real server and becomes the live endpoint
-                    if (match.Groups.Count != 5 || match.Groups[3].Value != Data.MachineAddress)
-                    {
-                        App.Logger.WriteLine(LOG_IDENT, "Failed to assert format for game join UDMUX entry");
-                        App.Logger.WriteLine(LOG_IDENT, logMessage);
-                        return;
-                    }
-
-                    if (int.TryParse(match.Groups[2].Value, out int udmuxPort)) Data.UdmuxPort = udmuxPort;
-                    if (int.TryParse(match.Groups[4].Value, out int rccPort)) Data.RccPort = rccPort;
-
-                    Data.UdmuxAddress = match.Groups[1].Value;
-                    Data.RccAddress = match.Groups[3].Value;
-
-                    // compatibility: MachineAddress tracks the effective live endpoint (UDMUX when present)
-                    Data.MachineAddress = match.Groups[1].Value;
-
-                    if (App.Settings.Prop.ShowServerDetails)
-                        _ = Data.QueryServerLocation();
-
-                    App.Logger.WriteLine(LOG_IDENT, $"Server is UDMUX protected ({Data})");
-                }
-                else if (logMessage.StartsWith(GameJoinedEntry))
-                {
-                    Match match = Regex.Match(logMessage, GameJoinedEntryPattern);
-
-                    if (match.Groups.Count != 2 || match.Groups[1].Value != Data.MachineAddress)
-                    {
-                        App.Logger.WriteLine(LOG_IDENT, $"Failed to assert format for game joined entry");
-                        App.Logger.WriteLine(LOG_IDENT, logMessage);
-                        return;
-                    }
-
-                    App.Logger.WriteLine(LOG_IDENT, $"Joined Game ({Data})");
-
-                    InGame = true;
-                    Data.TimeJoined = DateTime.Now;
-
-                    OnGameJoin?.Invoke(this, EventArgs.Empty);
                 }
             }
             else if (InGame && Data.PlaceId != 0)
@@ -477,16 +468,6 @@ namespace Bloxstrap.Roblox
                     }
 
                     _shouldAutoRejoin = false;
-                }
-                else if (logMessage.StartsWith(GameTeleportingEntry))
-                {
-                    App.Logger.WriteLine(LOG_IDENT, $"Initiating teleport to server ({Data})");
-                    _teleportMarker = true;
-                }
-                else if (logMessage.StartsWith(GameJoiningReservedServerEntry))
-                {
-                    _teleportMarker = true;
-                    _reservedTeleportMarker = true;
                 }
                 else if (logMessage.StartsWith(GameMessageEntry))
                 {
@@ -566,6 +547,16 @@ namespace Bloxstrap.Roblox
                     LastRPCRequest = DateTime.Now;
                 }
             }
+        }
+
+        private void TryConfirmJoin()
+        {
+            if (InGame || string.IsNullOrEmpty(_confirmedAddress) ||
+                (_confirmedAddress != _joinAddress && _confirmedAddress != Data.UdmuxAddress)) return;
+            InGame = true;
+            Data.TimeJoined = DateTime.Now;
+            App.Logger.WriteLine("ActivityWatcher", $"Joined Game ({Data})");
+            OnGameJoin?.Invoke(this, EventArgs.Empty);
         }
 
         private void StartHTTPServer()

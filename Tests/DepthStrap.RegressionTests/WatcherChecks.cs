@@ -95,6 +95,125 @@ internal static class WatcherChecks
             !ActivityWatcher.IsSessionLogTime(launched.AddMinutes(-1), launched.AddSeconds(-2), DateTime.Now),
             "Delayed watcher startup still accepts this client's log while excluding an earlier session");
         GlobalCache.ServerLocation.TryRemove("192.0.2.2", out _);
+        RunReliabilityChecks(check);
         App.Settings.Prop = new Settings();
+    }
+
+    private static void Join(ActivityWatcher activity, string job, bool universe = true)
+    {
+        activity.ReadLogEntry($"[FLog::Output] ! Joining game '{job}' place 999002 at 192.0.2.10");
+        if (universe) activity.ReadLogEntry("[FLog::GameJoinLoadTime] Report game_join_loadtime: placeid:999002, universeid:1359573625, userid:1");
+    }
+
+    private static void RunReliabilityChecks(Action<bool, string> check)
+    {
+        using (var parser = new ActivityWatcher("parser-fixture.log"))
+        {
+            int joins = 0, leaves = 0, endpointUpdates = 0;
+            parser.OnGameJoin += (_, _) => joins++;
+            parser.OnConnectionUpdated += (_, _) => endpointUpdates++;
+            parser.OnGameLeave += (_, _) => leaves++;
+            Join(parser, Guid.NewGuid().ToString());
+            parser.ReadLogEntry("[FLog::Network] serverId: 192.0.2.11|52535");
+            check(!parser.InGame, "An unrelated confirmation cannot confirm a pending join");
+            parser.ReadLogEntry("[FLog::Network] UDMUX Address = 192.0.2.11, Port = 52535 | RCC Server Address = 192.0.2.10, Port = 52535");
+            check(parser.InGame && joins == 1, "A server confirmation arriving before its matching UDMUX line still confirms the join");
+            parser.ReadLogEntry("[FLog::GameJoinUtil] GameJoinUtil::initiateTeleportToReservedServer");
+            string second = Guid.NewGuid().ToString(); Join(parser, second);
+            parser.ReadLogEntry("[FLog::Network] UDMUX Address = 192.0.2.11, Port = 52535 | RCC Server Address = 192.0.2.10, Port = 52535");
+            parser.ReadLogEntry("[FLog::Network] serverId: 192.0.2.10|52535");
+            check(parser.InGame && parser.Data.JobId == second && parser.Data.IsTeleport && parser.Data.ServerType == ServerType.Reserved && joins == 2 && leaves == 1,
+                "A reserved teleport without a disconnect updates the session and accepts RCC confirmation behind UDMUX");
+            parser.ReadLogEntry("[FLog::SingleSurfaceApp] leaveUGCGameInternal");
+            check(!parser.InGame && parser.Data.PlaceId == 0 && leaves == 2,
+                "Returning to Roblox Home clears the session even without a separate disconnect line");
+            Join(parser, Guid.NewGuid().ToString());
+            string replacement = Guid.NewGuid().ToString(); Join(parser, replacement);
+            parser.ReadLogEntry("[FLog::Network] serverId: 192.0.2.10|52535");
+            check(parser.InGame && parser.Data.JobId == replacement && joins == 3,
+                "A canceled pending join cannot prevent the next join from being tracked");
+            parser.ReadLogEntry("[FLog::Network] UDMUX Address = 192.0.2.11, Port = 52535 | RCC Server Address = 192.0.2.10, Port = 52535");
+            parser.ReadLogEntry("[FLog::Network] UDMUX Address = 192.0.2.11, Port = 52535 | RCC Server Address = 192.0.2.10, Port = 52535");
+            check(endpointUpdates == 1 && joins == 3 && parser.Data.UdmuxAddress == "192.0.2.11",
+                "A late UDMUX endpoint refreshes monitoring once without inventing a second game join");
+        }
+
+        App.Settings.Prop.CompetitiveNetworkMonitorEnabled = false;
+        using (var retryActivity = new ActivityWatcher("retry-fixture.log"))
+        using (var retryMonitor = new CompetitiveNetworkMonitor(retryActivity))
+        {
+            int attempts = 0;
+            retryMonitor.LocationRetryDelay = TimeSpan.Zero;
+            retryMonitor.UniverseLogWait = TimeSpan.Zero;
+            retryMonitor.UniverseLookup = (_, _) => Task.FromResult<long?>(CompetitiveRegionService.DeepwokenUniverseId);
+            retryMonitor.LocationLookup = (_, _) => Task.FromResult(Interlocked.Increment(ref attempts) < 3 ? ("", "Unknown") : ("London, United Kingdom", "Fixture"));
+            var resolved = new TaskCompletionSource<CompetitiveNetworkEvent>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var acted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            retryMonitor.RegionResolved += (_, evt) => resolved.TrySetResult(evt);
+            retryMonitor.DiagnosticsCompleted += (_, _) => done.TrySetResult();
+            retryMonitor.AutoLogHandler = evt =>
+            {
+                acted.TrySetResult(BadRegionAutoLog.ShouldLeave(evt, App.Settings.Prop, retryActivity.Data.JobId, DateTime.Now,
+                    CompetitiveRegionService.Classify(evt.Location, source: evt.RegionSource)));
+                return Task.FromResult(false);
+            };
+            var diagnosticsGate = (SemaphoreSlim)typeof(CompetitiveNetworkMonitor).GetField("_diagSemaphore", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(retryMonitor)!;
+            diagnosticsGate.Wait(); diagnosticsGate.Wait();
+            Join(retryActivity, Guid.NewGuid().ToString(), universe: false);
+            retryActivity.ReadLogEntry("[FLog::Network] serverId: 192.0.2.10|52535");
+            check(resolved.Task.Wait(TimeSpan.FromSeconds(5)) && attempts == 3 && resolved.Task.Result.IsDeepwoken,
+                "Transient location failures are retried and a missing universe log uses confirmed public place identity");
+            check(acted.Task.Wait(TimeSpan.FromSeconds(5)) && acted.Task.Result && !done.Task.IsCompleted &&
+                retryActivity.Data.UniverseId == CompetitiveRegionService.DeepwokenUniverseId,
+                "Warnings and autolog resolve before queued diagnostics, including when diagnostics are disabled");
+            diagnosticsGate.Release(2);
+            check(done.Task.Wait(TimeSpan.FromSeconds(5)), "Diagnostic workers complete after the early alert decision");
+            check(!App.Settings.Prop.CompetitiveNetworkMonitorEnabled,
+                "Starting a live watcher cannot overwrite saved monitoring choices with an old benchmark policy");
+        }
+
+        using (var staleActivity = new ActivityWatcher("stale-fixture.log"))
+        using (var staleMonitor = new CompetitiveNetworkMonitor(staleActivity))
+        {
+            var blocked = new TaskCompletionSource<(string, string)>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            int lookups = 0, evaluations = 0;
+            staleMonitor.LocationLookup = (_, _) =>
+            {
+                if (Interlocked.Increment(ref lookups) == 1) { started.TrySetResult(); return blocked.Task; }
+                return Task.FromResult(("Dallas, United States", "Fixture"));
+            };
+            var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            staleMonitor.RegionResolved += (_, _) => Interlocked.Increment(ref evaluations);
+            staleMonitor.DiagnosticsCompleted += (_, _) => done.TrySetResult();
+            Join(staleActivity, Guid.NewGuid().ToString());
+            staleActivity.ReadLogEntry("[FLog::Network] serverId: 192.0.2.10|52535");
+            Task oldEvaluation = staleMonitor.EvaluationTask;
+            check(started.Task.Wait(TimeSpan.FromSeconds(5)), "Slow location fixture reaches its in-flight lookup");
+            string latestJob = Guid.NewGuid().ToString(); Join(staleActivity, latestJob);
+            staleActivity.ReadLogEntry("[FLog::Network] serverId: 192.0.2.10|52535");
+            check(done.Task.Wait(TimeSpan.FromSeconds(5)), "A new teleport resolves while the old location lookup is pending");
+            blocked.TrySetResult(("London, United Kingdom", "Fixture"));
+            check(oldEvaluation.Wait(TimeSpan.FromSeconds(5)) && evaluations == 1 && staleMonitor.LatestEvent?.JobId == latestJob,
+                "A stale bad-region lookup cannot replace the new session or trigger another alert");
+        }
+
+        string lockedLog = Path.Combine(Paths.Cache, "locked-fixture_Player.log");
+        File.WriteAllText(lockedLog, $"[FLog::Output] ! Joining game '{Guid.NewGuid()}' place 999002 at 192.0.2.10\n[FLog::Network] serverId: 192.0.2.10|52535\n");
+        using (var lockedActivity = new ActivityWatcher(lockedLog))
+        {
+            var joined = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            lockedActivity.OnGameJoin += (_, _) => joined.TrySetResult();
+            Task reader;
+            using (var heldFile = new FileStream(lockedLog, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                reader = lockedActivity.RunAsync();
+                check(!reader.IsCompleted && !lockedActivity.InGame, "A temporarily locked log waits instead of terminating the watcher");
+            }
+            check(joined.Task.Wait(TimeSpan.FromSeconds(5)), "The watcher recovers when Roblox's log becomes readable");
+            lockedActivity.Dispose();
+            check(reader.Wait(TimeSpan.FromSeconds(5)), "Recovered log reader stops cleanly when its client exits");
+        }
     }
 }

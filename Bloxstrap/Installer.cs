@@ -141,6 +141,7 @@ namespace Bloxstrap
                 }
             }
             App.Settings.Load(false);
+            Competitive.RegionMonitoringPolicy.RepairLegacySetup(App.Settings.Prop, Networking.NetworkTestResult.Read());
             BrandTheme.Migrate(App.Settings.Prop);
             App.State.Load(false);
             App.FastFlags.Load(false);

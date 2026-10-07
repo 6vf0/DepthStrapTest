@@ -220,6 +220,8 @@ namespace Bloxstrap.UI
                 // WarnOnBadChimeRegion gates the scary ones; positive/fallback alerts always show.
                 if (badAlert && !App.Settings.Prop.WarnOnBadChimeRegion)
                     return;
+                if (!badAlert && !App.Settings.Prop.ChimeRegionMonitorEnabled)
+                    return;
 
                 var notif = CompetitiveRegionMonitor.BuildNotification(result);
                 if (notif is null) return;
@@ -240,7 +242,15 @@ namespace Bloxstrap.UI
                 {
                     Application.Current.Dispatcher.BeginInvoke(() =>
                     {
-                        if (!_disposing) new Elements.Dialogs.BadRegionAlertWindow(notif.Value.Title, message).Show();
+                        if (!_disposing && _activityWatcher?.InGame == true &&
+                            _activityWatcher.Data.JobId == result.JobId && App.Settings.Prop.WarnOnBadChimeRegion &&
+                            _watcher.NetworkMonitor?.LatestEvent?.Timestamp == result.Timestamp)
+                        {
+                            string alertKey = $"{result.JobId}|{_activityWatcher.Data.TimeJoined.Ticks}|{result.Location}";
+                            if (_lastBadRegionAlert == alertKey) return;
+                            _lastBadRegionAlert = alertKey;
+                            new Elements.Dialogs.BadRegionAlertWindow(notif.Value.Title, message).Show();
+                        }
                     });
                     return;
                 }
@@ -260,6 +270,7 @@ namespace Bloxstrap.UI
         #endregion
 
         // we may need to create our own handler for this, because this sorta sucks
+        private string? _lastBadRegionAlert;
         public void ShowAlert(string caption, string message, int duration, EventHandler? clickHandler)
         {
             string id = Guid.NewGuid().ToString()[..8];

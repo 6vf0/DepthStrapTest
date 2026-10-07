@@ -63,8 +63,7 @@ namespace Bloxstrap
             // the competitive Chime monitor also needs the activity watcher, even when
             // plain activity tracking is disabled by the user
             bool wantActivityWatcher = App.Settings.Prop.EnableActivityTracking ||
-                (App.Settings.Prop.CompetitiveModeEnabled &&
-                 (App.Settings.Prop.ChimeRegionMonitorEnabled || App.Settings.Prop.CompetitiveNetworkMonitorEnabled));
+                RegionMonitoringPolicy.NeedsWatcher(App.Settings.Prop);
 
             if (wantActivityWatcher)
             {
@@ -89,12 +88,11 @@ namespace Bloxstrap
                     PlayerRichPresence = new(ActivityWatcher);
 
                 // competitive network monitor (UDMUX/RCC capture, WARP state, ICMP, JSONL history)
-                if (_watcherData.LaunchMode == LaunchMode.Player && App.Settings.Prop.CompetitiveModeEnabled &&
-                    (App.Settings.Prop.CompetitiveNetworkMonitorEnabled || App.Settings.Prop.ChimeRegionMonitorEnabled))
+                if (_watcherData.LaunchMode == LaunchMode.Player && RegionMonitoringPolicy.NeedsWatcher(App.Settings.Prop))
                 {
                     NetworkMonitor = new(ActivityWatcher);
                     NetworkMonitor.AutoLogHandler = AutoLogBadRegionAsync;
-                    if (App.Settings.Prop.ChimeRegionMonitorEnabled)
+                    if (RegionMonitoringPolicy.NeedsAlerts(App.Settings.Prop))
                         CompetitiveMonitor = new(NetworkMonitor);
                 }
             }

@@ -879,8 +879,7 @@ namespace Bloxstrap
                 });
             }
 
-            bool competitiveMonitoring = App.Settings.Prop.CompetitiveModeEnabled &&
-                (App.Settings.Prop.ChimeRegionMonitorEnabled || App.Settings.Prop.CompetitiveNetworkMonitorEnabled);
+            bool competitiveMonitoring = Competitive.RegionMonitoringPolicy.NeedsWatcher(App.Settings.Prop);
 
             if (App.Settings.Prop.EnableActivityTracking || App.LaunchSettings.TestModeFlag.Active || autoclosePids.Any() || competitiveMonitoring)
             {

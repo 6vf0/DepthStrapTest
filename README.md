@@ -1,4 +1,4 @@
-# DepthStrap 1.0.2
+# DepthStrap 1.0.3
 
 A Windows Roblox launcher with a Crimson Contract theme, a custom stone and crimson icon, Competitive and Balanced profiles, and local server-route learning.
 
@@ -11,6 +11,8 @@ Run `DepthStrap.exe` from the Windows release package. It installs under `%LOCAL
 WARP downloads directly from Cloudflare during setup rather than being redistributed inside the ZIP. WARP routes the computer's Internet traffic through Cloudflare; Cloudflare manages its service, registration and own logs. DepthStrap's network reset retains WARP's installation and registration.
 
 The standalone Windows x64 build includes .NET and requires no separate runtime installation. This build is unsigned and has no app auto-update feed configured.
+
+Version 1.0.3 repairs warning settings disabled by an older failed datacenter-registry test. Live warnings and autolog operate independently of benchmark capabilities and start their required watcher even when other monitoring options are disabled. The watcher recognizes replacement joins and teleports without disconnect lines, accepts either server-confirmation order and retries temporarily locked log files. Location lookup retries transient failures and can use matching selected-server metadata or observed job history; missing universe logs fall back to Roblox's public place API. Warning and autolog decisions precede optional WARP/ping diagnostics. Unknown locations never cause an automatic leave, and stale results cannot warn about a server you have left. The recovery-loop safeguards from 1.0.2 remain in place.
 
 ## Features
 

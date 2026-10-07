@@ -85,8 +85,8 @@ namespace Bloxstrap.Networking
             s.AdaptiveRegionPreferencesEnabled = IcmpAvailable && CloudflareAvailable;
             s.PreferredRegionEnabled = RegionsAvailable && IcmpAvailable && CloudflareAvailable;
             s.AutoSelectPreferredServerOnLaunch = s.PreferredRegionEnabled;
-            s.ChimeRegionMonitorEnabled = RegionsAvailable;
-            s.WarnOnBadChimeRegion = RegionsAvailable;
+            // Alert preferences depend on each live join's evidence, not registry/ICMP
+            // availability during setup. Preserve the user's warning and autolog choices.
         }
         public void Save()
         {

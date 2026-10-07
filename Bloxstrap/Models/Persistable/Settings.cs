@@ -127,6 +127,7 @@ namespace Bloxstrap.Models.Persistable
         // Competitive / Chime Region Monitor
         public bool ChimeRegionMonitorEnabled { get; set; } = true;
         public bool WarnOnBadChimeRegion { get; set; } = true;
+        public int RegionMonitoringVersion { get; set; } = 0;
         public bool LogCompetitiveSessions { get; set; } = true;
 
         /// <summary>

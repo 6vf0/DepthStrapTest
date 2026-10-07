@@ -185,7 +185,7 @@ namespace Bloxstrap.Integrations
             }
         }
 
-        private static async Task<long?> ResolveUniverseIdAsync(long placeId, CancellationToken token)
+        internal static async Task<long?> ResolveUniverseIdAsync(long placeId, CancellationToken token)
         {
             try
             {

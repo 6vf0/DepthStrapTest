@@ -404,6 +404,8 @@ namespace Bloxstrap
                 Task.Run(RemoteData.LoadData); // ok
 
                 Settings.Load();
+                if (Competitive.RegionMonitoringPolicy.RepairLegacySetup(Settings.Prop, Networking.NetworkTestResult.Read()))
+                    Settings.Save();
                 if (Settings.Prop.AppearanceVersion < 1)
                 {
                     BrandTheme.Migrate(Settings.Prop);

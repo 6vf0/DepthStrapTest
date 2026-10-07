@@ -54,6 +54,11 @@ namespace Bloxstrap.Competitive
         /// <summary>Stage 1: region resolved (fast path - UI can show the Chime balloon immediately).</summary>
         public event EventHandler<CompetitiveNetworkEvent>? RegionResolved;
         internal Func<CompetitiveNetworkEvent, Task<bool>>? AutoLogHandler { get; set; }
+        internal Func<string, CancellationToken, Task<(string Location, string Source)>> LocationLookup { get; set; } = QueryLocationAsync;
+        internal Func<long, CancellationToken, Task<long?>> UniverseLookup { get; set; } = CompetitiveServerSelector.ResolveUniverseIdAsync;
+        internal TimeSpan LocationRetryDelay { get; set; } = TimeSpan.FromSeconds(2);
+        internal TimeSpan UniverseLogWait { get; set; } = TimeSpan.FromSeconds(15);
+        internal Task EvaluationTask { get; private set; } = Task.CompletedTask;
 
         /// <summary>Stage 2: ICMP/WARP/traceroute finished and the JSONL line is on disk.</summary>
         public event EventHandler<CompetitiveNetworkEvent>? DiagnosticsCompleted;
@@ -65,6 +70,7 @@ namespace Bloxstrap.Competitive
             _pendingJoin = CompetitiveServerSelector.LoadPendingJoin();
 
             _activityWatcher.OnGameJoin += OnGameJoin;
+            _activityWatcher.OnConnectionUpdated += OnGameJoin;
             _activityWatcher.OnGameLeave += OnGameLeave;
 
             // session metadata header (one per Roblox launch); also warms the Cloudflare cache
@@ -101,7 +107,7 @@ namespace Bloxstrap.Competitive
                 IsDeepwoken = snapshot.UniverseId == CompetitiveRegionService.DeepwokenUniverseId, Cloudflare = CloudflareNetworkState.Cached
             });
 
-            _ = Task.Run(() => ProcessAsync(snapshot, universeResolved));
+            EvaluationTask = Task.Run(() => ProcessAsync(snapshot, universeResolved));
         }
 
         private static string BuildKey(ActivitySnapshot snapshot) =>
@@ -117,22 +123,29 @@ namespace Bloxstrap.Competitive
             }
         }
 
-        private DateTimeOffset _networkPolicyTime;
         private async Task ProcessAsync(ActivitySnapshot snapshot, Task<long> universeResolved)
         {
             var token = _token;
             var s = App.Settings.Prop;
             var policy = Networking.NetworkTestResult.Read();
-            if (policy is not null && policy.CompletedAt != _networkPolicyTime) { policy.Apply(s); _networkPolicyTime = policy.CompletedAt; }
             bool locked = false;
             try
             {
                 if (!Networking.NetworkHistory.Accept(snapshot.Timestamp)) return;
                 if (snapshot.UniverseId == 0)
                 {
-                    try { snapshot = snapshot with { UniverseId = await universeResolved.WaitAsync(TimeSpan.FromSeconds(15), token) }; }
-                    catch (TimeoutException) { /* Identity unavailable: record Unknown universe. */ }
+                    try { snapshot = snapshot with { UniverseId = await universeResolved.WaitAsync(UniverseLogWait, token) }; }
+                    catch (TimeoutException)
+                    {
+                        using var identityBudget = CancellationTokenSource.CreateLinkedTokenSource(token);
+                        identityBudget.CancelAfter(TimeSpan.FromSeconds(8));
+                        try { snapshot = snapshot with { UniverseId = await UniverseLookup(snapshot.PlaceId, identityBudget.Token) ?? 0 }; }
+                        catch (OperationCanceledException) when (!token.IsCancellationRequested) { }
+                    }
                 }
+                if (!IsCurrent(snapshot)) return;
+                if (_activityWatcher.Data.UniverseId == 0 && snapshot.UniverseId > 0)
+                    _activityWatcher.Data.UniverseId = snapshot.UniverseId;
                 bool isDeepwoken = snapshot.UniverseId == CompetitiveRegionService.DeepwokenUniverseId;
                 // "possible" on purpose: every reserved Deepwoken teleport is a Chime candidate until
                 // real session history confirms which Place IDs are actually the Chime destination.
@@ -144,27 +157,37 @@ namespace Bloxstrap.Competitive
                 string location = "";
                 string regionSource = "Unknown";
 
-                if (!string.IsNullOrEmpty(endpoint))
+                bool pendingMatches = _pendingJoin?.JobId == snapshot.JobId && _pendingJoin.PlaceId == snapshot.PlaceId;
+                int? dcId = pendingMatches ? _pendingJoin!.DataCenterId : null;
+                if (pendingMatches && !string.IsNullOrWhiteSpace(_pendingJoin!.Region))
+                { location = _pendingJoin.Region; regionSource = "Selected public server metadata"; }
+                if (location.Length == 0)
                 {
                     try
                     {
-                        var lookup = new ActivityData { MachineAddress = endpoint };
-                        location = await lookup.QueryServerLocation(token, showErrors: false) ?? "";
-
-                        regionSource = string.IsNullOrEmpty(location) ? "Unknown" : lookup.LastLocationSource;
+                        if (Networking.KnownServerRegions.ForPlace(snapshot.PlaceId).TryGetValue(snapshot.JobId, out var known))
+                        { location = known.Region; dcId = known.DataCenterId; regionSource = "Observed server history"; }
                     }
-                    catch (Exception ex)
+                    catch (Exception ex) { App.Logger.WriteException("NetworkMonitor::ReadRegion", ex); }
+                }
+                if (location.Length == 0 && !string.IsNullOrEmpty(endpoint))
+                {
+                    for (int attempt = 0; attempt < 3 && IsCurrent(snapshot); attempt++)
                     {
-                        App.Logger.WriteLine(LOG_IDENT, $"Location query failed: {ex.Message}");
-                        regionSource = "Unknown";
+                        try
+                        {
+                            (location, regionSource) = await LocationLookup(endpoint, token);
+                            if (!string.IsNullOrWhiteSpace(location) && location != "Unknown") break;
+                            location = ""; regionSource = "Unknown";
+                        }
+                        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                        catch (Exception ex) { App.Logger.WriteLine(LOG_IDENT, $"Location query attempt {attempt + 1} failed: {ex.Message}"); }
+                        if (attempt < 2) await Task.Delay(LocationRetryDelay, token);
                     }
                 }
 
                 token.ThrowIfCancellationRequested();
-                bool pendingMatches = _pendingJoin?.JobId == snapshot.JobId && _pendingJoin.PlaceId == snapshot.PlaceId;
-                int? dcId = pendingMatches ? _pendingJoin!.DataCenterId : null;
-                if (location.Length == 0 && pendingMatches && !string.IsNullOrWhiteSpace(_pendingJoin!.Region))
-                { location = _pendingJoin.Region; regionSource = "Selected public server metadata"; }
+                if (!IsCurrent(snapshot)) return;
                 if (dcId is > 0)
                 {
                     try { await CompetitiveRegionService.EnsureRegistryLoadedAsync().WaitAsync(TimeSpan.FromSeconds(5), token); }
@@ -208,6 +231,10 @@ namespace Bloxstrap.Competitive
 
                 // fast path first: the Chime balloon must not wait for ICMP/traceroute
                 if (IsCurrent(snapshot)) Publish(RegionResolved, evt);
+                // Warning and leave decisions require only confirmed identity and location.
+                // A slow/failed Cloudflare query or queued diagnostics cannot suppress them.
+                if (IsCurrent(snapshot) && AutoLogHandler is not null && await AutoLogHandler(evt))
+                    return;
 
                 // ---------- stage 2: diagnostics ----------
                 await _diagSemaphore.WaitAsync(token);
@@ -238,14 +265,7 @@ namespace Bloxstrap.Competitive
                 }
 
                 evt = evt with { Cloudflare = cf, Latency = latency };
-                // Learning finishes before autolog, so a newly measured preferred region
-                // can be retained. Traceroute must not delay an early leave decision.
                 await Networking.AdaptiveRegionService.ObserveAsync(evt, token);
-                if (IsCurrent(snapshot) && AutoLogHandler is not null && await AutoLogHandler(evt))
-                {
-                    RecordLatest(evt);
-                    return;
-                }
                 string traceFile = "";
                 if (doTrace)
                 {
@@ -299,6 +319,13 @@ namespace Bloxstrap.Competitive
             }
         }
 
+        private static async Task<(string Location, string Source)> QueryLocationAsync(string endpoint, CancellationToken token)
+        {
+            var lookup = new ActivityData { MachineAddress = endpoint };
+            string location = await lookup.QueryServerLocation(token, showErrors: false) ?? "";
+            return (location, location.Length == 0 ? "Unknown" : lookup.LastLocationSource);
+        }
+
         /// <summary>Most recent evaluated event (any job). Null before the first join.</summary>
         public CompetitiveNetworkEvent? LatestEvent
         {
@@ -349,6 +376,7 @@ namespace Bloxstrap.Competitive
             _isDisposed = true;
 
             try { _activityWatcher.OnGameJoin -= OnGameJoin; } catch { /* best effort */ }
+            try { _activityWatcher.OnConnectionUpdated -= OnGameJoin; } catch { /* best effort */ }
             try { _activityWatcher.OnGameLeave -= OnGameLeave; } catch { /* best effort */ }
             CompetitiveNetworkState.ClearIfOwned(_activityWatcher.RobloxProcessId);
             _cts.Cancel();

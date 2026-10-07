@@ -195,15 +195,15 @@
 
             <StackPanel Margin="0,8,0,0">
                 <controls:OptionControl Header="Monitor Chime teleports" Description="Detects Deepwoken (Universe 1359573625) reserved-server teleports via the Roblox log watcher. No injection, no packet hooks." >
-                    <ui:ToggleSwitch IsEnabled="{Binding RegionsAvailable}" IsChecked="{Binding ChimeMonitorEnabled, Mode=TwoWay}" />
+                    <ui:ToggleSwitch IsChecked="{Binding ChimeMonitorEnabled, Mode=TwoWay}" />
                 </controls:OptionControl>
 
                 <controls:OptionControl Header="Warn on bad region" Description="Shows a popup for a known bad Deepwoken server or Chime region. Bad-region joins are logged even when alerts are disabled.">
-                    <ui:ToggleSwitch IsEnabled="{Binding RegionsAvailable}" IsChecked="{Binding WarnOnBadChimeRegion, Mode=TwoWay}" />
+                    <ui:ToggleSwitch IsChecked="{Binding WarnOnBadChimeRegion, Mode=TwoWay}" />
                 </controls:OptionControl>
 
                 <controls:OptionControl Header="Autolog and rejoin Deepwoken" Description="Leave a confirmed bad-region Deepwoken gameplay server, reopen Roblox Home, then rejoin after a cancelable 10-second countdown. Covers the Depths, Layer 2 and Chime. The entry menu, nearby unmeasured regions and unknown locations are retained. One recovery per 10 minutes; the recovered client shows warnings without restarting again. Leaving may forfeit a run or match; rejoining opens the entry place. Save to apply on the next launch.">
-                    <ui:ToggleSwitch IsEnabled="{Binding RegionsAvailable}" IsChecked="{Binding AutoLeaveBadChimeRegion, Mode=TwoWay}" />
+                    <ui:ToggleSwitch IsChecked="{Binding AutoLeaveBadChimeRegion, Mode=TwoWay}" />
                 </controls:OptionControl>
                 <controls:OptionControl Header="Save match region history" Description="Persists every evaluated join to Cache/CompetitiveRegionHistory.json for later analysis.">
                     <ui:ToggleSwitch IsChecked="{Binding LogCompetitiveSessions, Mode=TwoWay}" />
